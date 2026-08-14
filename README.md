@@ -1,6 +1,22 @@
 # Aardwolf Mud
 
-MUSHclient plugins for [Aardwolf](https://www.aardwolf.com/).
+MUSHclient and MudForge plugins for [Aardwolf](https://www.aardwolf.com/).
+
+## Aardwolf Inventory (MudForge)
+
+`aw-inv.lua` is a ground-up MudForge rewrite of Durel's Inventory Manager
+(dinv). It captures Aardwolf's tagged data commands (`eqdata`, `invdata`,
+`keyring data`, `vault data`), indexes every item by serial, and shows worn,
+carried, container, keyring and vault contents in one searchable panel with
+flags and serial numbers. `{invmon}` activity triggers a debounced rescan so
+the panel follows looting on its own.
+
+Type `/awinv` for commands. Requires the Aardwolf Core plugin (GMCP + tag
+handling) from the
+[aardwolf-mudforge](https://github.com/SeanStoves/aardwolf-mudforge) suite.
+
+`dist/aw-inv.json` is the installable MudForge plugin blob built from the
+same source.
 
 ## Boot Promotion Tracker
 
