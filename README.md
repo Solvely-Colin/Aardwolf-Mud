@@ -4,6 +4,9 @@ MUSHclient plugins for [Aardwolf](https://www.aardwolf.com/).
 
 ## Boot Promotion Tracker
 
+<img width="814" height="225" alt="image" src="https://github.com/user-attachments/assets/561de7db-cb97-462e-860f-b5afe8c2f372" />
+
+
 `Boot_Promotion_Tracker.xml` (v1.9) tracks Boot Lyceum clan promotion requirements
 (per [aardwolfboot.com/promotion-guide](https://aardwolfboot.com/promotion-guide)):
 days in clan, QP earned, campaigns (gquest wins count 1:1), and goals completed —
