@@ -1,0 +1,640 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+<!--
+Boot Promotion Tracker v1.9 - for Catdad
+Tracks Neophyte -> Acolyte requirements (aardwolfboot.com/promotion-guide):
+2 weeks in clan | 2500 qp earned | 30 campaigns (gq wins count 1:1) | 3 goals
+
+Fully self-seeding: type 'whois' and every stat syncs from the game's own
+ledger (Qp Earned, Campaigns Done, Gquests Won, Quests Complete). 'score'
+syncs Goals done. GMCP keeps QP live between whois checks, and campaign
+completions / your GQ wins are counted as they happen.
+
+Only manual input: promo set joined YYYY-MM-DD  (your induction date)
+Commands: promo | promo note | promo help | promo hide/show | promo sync
+Update: overwrite this file in worlds/plugins, then Plugins -> Reinstall.
+-->
+<muclient>
+<plugin
+   name="Boot_Promotion_Tracker"
+   author="Catdad"
+   id="b007b007c47dadb007c47dad"
+   language="Lua"
+   purpose="Tracks Boot Lyceum promotion requirements via GMCP, with miniwindow"
+   save_state="y"
+   date_written="2026-08-09"
+   requires="4.73"
+   version="1.9"
+>
+<description trim="y">
+Boot promotion tracker + progress window. Type: promo help
+</description>
+</plugin>
+
+<triggers>
+  <trigger
+   enabled="y"
+   match="As a reward, I am giving you (\d+) quest points"
+   regexp="y"
+   script="promo_quest_reward"
+   sequence="100"
+  >
+  </trigger>
+
+  <!-- Campaign completion (official message per AardWiki MudMessages):
+       CONGRATULATIONS! You have completed your campaign. -->
+  <trigger
+   enabled="y"
+   match="You have completed your campaign"
+   regexp="y"
+   script="promo_cp_done"
+   sequence="100"
+  >
+  </trigger>
+
+  <!-- Global quest win announcement; handler checks it was OUR win -->
+  <trigger
+   enabled="y"
+   match="Global Quest.*has been won by (\w+)"
+   regexp="y"
+   script="promo_gq_won"
+   sequence="100"
+  >
+  </trigger>
+
+  <!-- whois parsing: header identifies whose whois it is -->
+  <trigger
+   enabled="y"
+   match="^\[\s*\d+\s+T\d+.*?\]\s+(\w+)"
+   regexp="y"
+   script="promo_whois_header"
+   sequence="90"
+  >
+  </trigger>
+
+  <trigger
+   enabled="y"
+   match="Qp Earned\s*:\s*\[\s*(\d+)\s*\]"
+   regexp="y"
+   script="promo_whois_qp"
+   sequence="100"
+  >
+  </trigger>
+
+  <trigger
+   enabled="y"
+   match="Campaigns Done\s*:\s*\[\s*(\d+)\s*\]"
+   regexp="y"
+   script="promo_whois_cp"
+   sequence="100"
+  >
+  </trigger>
+
+  <trigger
+   enabled="y"
+   match="Gquests Won\s*:\s*\[\s*(\d+)\s*\]"
+   regexp="y"
+   script="promo_whois_gq"
+   sequence="100"
+  >
+  </trigger>
+
+  <trigger
+   enabled="y"
+   match="Quests Complete\s*:\s*\[\s*(\d+)\s*\]"
+   regexp="y"
+   script="promo_whois_quests"
+   sequence="100"
+  >
+  </trigger>
+
+  <!-- Auto-sync "Goals done" from the score command output -->
+  <trigger
+   enabled="y"
+   match="Goals done\s*:\s*\[\s*(\d+)\s*\]"
+   regexp="y"
+   script="promo_score_goals"
+   sequence="100"
+  >
+  </trigger>
+</triggers>
+
+<aliases>
+  <alias
+   match="^promo(?:\s+(.*))?$"
+   enabled="y"
+   regexp="y"
+   ignore_case="y"
+   script="promo_cmd"
+   sequence="100"
+  >
+  </alias>
+</aliases>
+
+<script>
+<![CDATA[
+
+require "movewindow"
+require "gmcphelper"   -- provides gmcp() lookups via the GMCP handler
+
+local GMCP_ID = "3e7dedbe37e44942dd46d264"  -- aard package GMCP handler
+local gmcp_ok = false
+
+-- promotion tiers per aardwolfboot.com/promotion-guide
+local RANKS = {
+  { name = "Neo > Acolyte",  days = 14,  qp = 2500,  cp = 30,  goals = 3  },
+  { name = "Aco > Adept",    days = 42,  qp = 7500,  cp = 100, goals = 10 },
+  { name = "Adp > Ascend",   days = 90,  qp = 15000, cp = 200, goals = 15 },
+  { name = "Asc > Savant",   days = 120, qp = 50000, cp = 350, goals = 30 },
+}
+
+local function cur_rank ()
+  local n = tonumber (GetVariable ("rank")) or 1
+  if n < 1 then n = 1 end
+  if n > #RANKS then n = #RANKS end
+  return RANKS [n], n
+end
+
+-- ============ window layout ============
+
+local win = GetPluginID ()
+local WIDTH, HEIGHT   = 240, 128
+local TITLE_H         = 22
+local ROW_H           = 24
+local PAD             = 8
+local windowinfo
+
+local C_BG     = ColourNameToRGB ("#1A1A1A")
+local C_TITLE  = ColourNameToRGB ("#2B2B2B")
+local C_TEXT   = ColourNameToRGB ("silver")
+local C_HEAD   = ColourNameToRGB ("gold")
+local C_BAR_BG = ColourNameToRGB ("#333333")
+local C_DONE   = ColourNameToRGB ("#3CB371")
+local C_PROG   = ColourNameToRGB ("#CC7722")
+
+-- ============ helpers ============
+
+local function getnum (key)
+  return tonumber (GetVariable (key)) or 0
+end
+
+local function setnum (key, value)
+  SetVariable (key, tostring (value))
+end
+
+local function say (msg, colour)
+  ColourNote (colour or "silver", "black", "[PROMO] " .. msg)
+end
+
+local function days_in_clan ()
+  local joined = tonumber (GetVariable ("joined_epoch"))
+  if not joined then return nil end
+  return math.floor ((os.time () - joined) / 86400)
+end
+
+-- ============ miniwindow ============
+
+local function draw_row (row, label, have, need)
+  local y = TITLE_H + PAD + (row - 1) * ROW_H
+
+  WindowText (win, "f", label, PAD, y, 0, 0, C_TEXT)
+
+  if need == nil then
+    -- informational row: count only, no requirement bar
+    WindowText (win, "s", tostring (have), 78 + 100 + 6, y + 1, 0, 0, C_TEXT)
+    return
+  end
+
+  local done = have >= need
+  local frac = math.min (1, need > 0 and (have / need) or 0)
+
+  local bar_x, bar_w, bar_h = 78, 100, 10
+  local by = y + 2
+  WindowRectOp (win, miniwin.rect_fill, bar_x, by, bar_x + bar_w, by + bar_h,
+                C_BAR_BG)
+  if frac > 0 then
+    WindowRectOp (win, miniwin.rect_fill, bar_x, by,
+                  bar_x + math.floor (bar_w * frac), by + bar_h,
+                  done and C_DONE or C_PROG)
+  end
+  WindowRectOp (win, miniwin.rect_frame, bar_x, by, bar_x + bar_w,
+                by + bar_h, C_BAR_BG)
+
+  local txt = string.format ("%d/%d", have, need)
+  WindowText (win, "s", txt, bar_x + bar_w + 6, y + 1, 0, 0,
+              done and C_DONE or C_TEXT)
+end
+
+local function draw_cp (row, need)
+  local cp, gq = getnum ("cp"), getnum ("gq")
+  local have = cp + gq
+  local y = TITLE_H + PAD + (row - 1) * ROW_H
+  local done = have >= need
+  local frac = math.min (1, have / need)
+
+  WindowText (win, "f", "CP", PAD, y, 0, 0, C_TEXT)
+
+  local bar_x, bar_w, bar_h = 78, 100, 10
+  local by = y + 2
+  WindowRectOp (win, miniwin.rect_fill, bar_x, by, bar_x + bar_w, by + bar_h,
+                C_BAR_BG)
+  if frac > 0 then
+    WindowRectOp (win, miniwin.rect_fill, bar_x, by,
+                  bar_x + math.floor (bar_w * frac), by + bar_h,
+                  done and C_DONE or C_PROG)
+  end
+  WindowRectOp (win, miniwin.rect_frame, bar_x, by, bar_x + bar_w,
+                by + bar_h, C_BAR_BG)
+
+  local txt
+  if gq > 0 then
+    txt = string.format ("%d+%d/%d", cp, gq, need)
+  else
+    txt = string.format ("%d/%d", cp, need)
+  end
+  WindowText (win, "s", txt, bar_x + bar_w + 6, y + 1, 0, 0,
+              done and C_DONE or C_TEXT)
+end
+
+local function do_redraw ()
+  if GetVariable ("hidden") == "y" then
+    WindowShow (win, false)
+    return
+  end
+
+  WindowCreate (win, windowinfo.window_left, windowinfo.window_top,
+                WIDTH, HEIGHT, windowinfo.window_mode,
+                windowinfo.window_flags, C_BG)
+
+  -- play nice with the package's window stacking (best effort)
+  pcall (function ()
+    CallPlugin ("462b665ecb569efbf261422f", "registerMiniwindow", win)
+  end)
+
+  WindowFont (win, "f", "Lucida Console", 9)
+  WindowFont (win, "s", "Lucida Console", 8)
+  WindowFont (win, "t", "Lucida Console", 9, true)
+
+  -- title bar (drag handle)
+  WindowRectOp (win, miniwin.rect_fill, 0, 0, WIDTH, TITLE_H, C_TITLE)
+  WindowText (win, "t", "BOOT: " .. (cur_rank ()).name, PAD, 5, 0, 0, C_HEAD)
+  WindowText (win, "s", gmcp_ok and "gmcp" or "txt",
+              WIDTH - 34, 6, 0, 0, C_TEXT)
+  movewindow.add_drag_handler (win, 0, 0, WIDTH, TITLE_H)
+
+  local R = cur_rank ()
+  local d = days_in_clan () or 0
+  draw_row (1, "Days",  d,              R.days)
+  draw_row (2, "QP",    getnum ("qp"),  R.qp)
+  draw_cp  (3, R.cp)
+  draw_row (4, "Goals", getnum ("goals"), R.goals)
+
+  WindowShow (win, true)
+end
+
+local last_draw_err = nil
+
+local function redraw ()
+  local ok, err = pcall (do_redraw)
+  if not ok then
+    if err ~= last_draw_err then
+      last_draw_err = err
+      say ("Window draw error (report this line): " .. tostring (err),
+           "orange")
+    end
+  else
+    last_draw_err = nil
+  end
+end
+
+-- ============ GMCP wiring ============
+
+local function gmcp_num (key)
+  local ok, res = pcall (function () return gmcp (key) end)
+  if ok and res and res ~= "" then
+    return tonumber ((string.gsub (tostring (res), "[^%d%-]", "")))
+  end
+  return nil
+end
+
+local function gmcp_qp ()
+  return gmcp_num ("char.worth.qp")
+end
+
+local function poll_qp (announce)
+  -- Preferred: char.worth.qpearned IS the official "Qp Earned" whois stat
+  -- (confirmed identical in testing), so read it directly.
+  local qe = gmcp_num ("char.worth.qpearned")
+  if qe ~= nil then
+    gmcp_ok = true
+    if qe ~= getnum ("qp") then
+      setnum ("qp", qe)
+      if not announce then
+        say (string.format ("QP earned (from game): %d", qe), "darkgray")
+      end
+    end
+    if announce then
+      say ("GMCP linked. QP earned (official stat): " .. qe)
+    end
+    redraw ()
+    return
+  end
+
+  -- Fallback: delta-track the qp balance.
+  local qp = gmcp_qp ()
+  if qp == nil then
+    gmcp_ok = false
+    redraw ()
+    return
+  end
+  gmcp_ok = true
+  local last = tonumber (GetVariable ("last_qp"))
+  if last == nil then
+    SetVariable ("last_qp", tostring (qp))
+    if announce then say ("GMCP linked (delta mode). QP balance: " .. qp) end
+    redraw ()
+    return
+  end
+  if qp > last then
+    setnum ("qp", getnum ("qp") + (qp - last))
+    say (string.format ("+%d qp earned (tracked total: %d)",
+         qp - last, getnum ("qp")), "darkgray")
+  end
+  SetVariable ("last_qp", tostring (qp))
+  redraw ()
+end
+
+function OnPluginBroadcast (msg, id, name, text)
+  if id == GMCP_ID and string.match (string.lower (text or ""), "^char%.worth") then
+    poll_qp (false)
+  end
+end
+
+function OnPluginInstall ()
+  windowinfo = movewindow.install (win, miniwin.pos_top_right)
+  poll_qp (true)
+  if not gmcp_ok then
+    say ("GMCP handler not reachable - text-trigger fallback active.",
+         "orange")
+  end
+  redraw ()
+end
+
+function OnPluginConnect ()
+  poll_qp (false)
+end
+
+function OnPluginSaveState ()
+  movewindow.save_state (win)
+end
+
+function OnPluginClose ()
+  WindowShow (win, false)
+end
+
+function OnPluginDisable ()
+  WindowShow (win, false)
+end
+
+function OnPluginEnable ()
+  redraw ()
+end
+
+-- ============ text triggers ============
+
+function promo_quest_reward (name, line, wildcards)
+  setnum ("quests", getnum ("quests") + 1)
+  if not gmcp_ok then
+    local qp = tonumber (wildcards [1]) or 0
+    setnum ("qp", getnum ("qp") + qp)
+  end
+  say (string.format ("Quest #%d logged", getnum ("quests")), "darkgray")
+  redraw ()
+end
+
+function promo_score_goals (name, line, wildcards)
+  local n = tonumber (wildcards [1])
+  if n and n ~= getnum ("goals") then
+    setnum ("goals", n)
+    say ("Goals synced from score: " .. n)
+    redraw ()
+  end
+end
+
+local whois_self = false
+
+local function my_name ()
+  local me = ""
+  pcall (function () me = string.lower (tostring (gmcp ("char.base.name"))) end)
+  return me
+end
+
+function promo_whois_header (name, line, wildcards)
+  local who = string.lower (wildcards [1] or "")
+  whois_self = (who ~= "" and who == my_name ())
+end
+
+local function whois_sync (key, label, wildcards)
+  if not whois_self then return end
+  local n = tonumber (wildcards [1])
+  if n and n ~= getnum (key) then
+    setnum (key, n)
+    say (label .. " synced from whois: " .. n)
+    redraw ()
+  end
+end
+
+function promo_whois_qp (name, line, wildcards)
+  whois_sync ("qp", "QP earned", wildcards)
+end
+
+function promo_whois_cp (name, line, wildcards)
+  whois_sync ("cp", "Campaigns", wildcards)
+end
+
+function promo_whois_gq (name, line, wildcards)
+  whois_sync ("gq", "GQuest wins", wildcards)
+end
+
+function promo_whois_quests (name, line, wildcards)
+  whois_sync ("quests", "Quests", wildcards)
+end
+
+function promo_gq_won (name, line, wildcards)
+  local winner = string.lower (wildcards [1] or "")
+  local me = my_name ()
+  if me ~= "" and winner == me then
+    setnum ("gq", getnum ("gq") + 1)
+    say (string.format ("GQ WIN logged! (total: %d)", getnum ("gq")))
+    redraw ()
+  end
+end
+
+function promo_cp_done (name, line, wildcards)
+  setnum ("cp", getnum ("cp") + 1)
+  say (string.format ("Campaign logged (total: %d)", getnum ("cp")),
+       "darkgray")
+  redraw ()
+end
+
+-- ============ report / note ============
+
+local function req_line (label, have, need)
+  local ok = have >= need
+  ColourTell (ok and "lime" or "orange", "black",
+              ok and " [DONE] " or " [....] ")
+  ColourTell ("silver", "black", string.format ("%-22s ", label))
+  ColourTell ("white",  "black", string.format ("%d / %d", have, need))
+  Note ("")
+end
+
+local function report ()
+  local R, rn = cur_rank ()
+  Note ("")
+  ColourNote ("yellow", "black",
+    string.format ("=== Boot Promotion %d: %s ===", rn, R.name))
+  local d = days_in_clan ()
+  if d then
+    req_line ("Days in clan", d, R.days)
+  else
+    ColourNote ("orange", "black",
+      " [ ?? ] Days in clan        set with: promo set joined YYYY-MM-DD")
+  end
+  req_line ("QP earned", getnum ("qp"), R.qp)
+  req_line ("Campaigns (gq count)", getnum ("cp") + getnum ("gq"), R.cp)
+  req_line ("Goals completed", getnum ("goals"), R.goals)
+  Note ("")
+end
+
+local function draft_note ()
+  local d = days_in_clan ()
+  Note ("")
+  ColourNote ("yellow", "black",
+    "--- Draft promotion note (board personal, to Boot) ---")
+  local R = cur_rank ()
+  Note ("Requesting promotion (" .. R.name .. "). My numbers:")
+  Note (string.format ("  Days in clan: %s",
+        d and tostring (d) or "SET JOINED DATE"))
+  Note (string.format ("  QP earned: %d", getnum ("qp")))
+  Note (string.format ("  Campaigns completed: %d (plus %d gquest wins)",
+        getnum ("cp"), getnum ("gq")))
+  Note (string.format ("  Goals completed: %d - list them here (see 'goals')",
+        getnum ("goals")))
+  Note ("Ready for a leader task whenever convenient. Thanks!")
+  ColourNote ("yellow", "black",
+    "------------------------------------------------------")
+  Note ("")
+end
+
+-- ============ commands ============
+
+local function show_help ()
+  Note ("")
+  ColourNote ("yellow", "black", "Boot Promotion Tracker v1.9:")
+  Note ("  promo                    - progress report")
+  Note ("  promo note               - draft promotion-request text")
+  Note ("  promo hide / promo show  - toggle progress window")
+  Note ("  promo rank <1-4>         - which promotion to track")
+  Note ("  promo sync               - re-check GMCP link / QP balance")
+  Note ("  promo set joined <YYYY-MM-DD>")
+  Note ("  promo set qp|cp|gq|goals <n>")
+  Note ("  promo add qp <n> | add cp | add gq | add goal")
+  Note ("  (auto-sync: type 'whois' for qp/cp/gq/quests, 'score' for goals)")
+  Note ("")
+end
+
+function promo_cmd (name, line, wildcards)
+  local args = (wildcards [1] or "")
+  local a, b, c = string.match (args, "^(%S*)%s*(%S*)%s*(%S*)")
+  a = string.lower (a or "")
+
+  if a == "" then
+    report ()
+
+  elseif a == "show" then
+    SetVariable ("hidden", "n")
+    say ("Window shown (top-right by default; drag by title bar).")
+    redraw ()
+
+  elseif a == "help" then
+    show_help ()
+
+  elseif a == "rank" then
+    local n = tonumber (b)
+    if n and RANKS [n] then
+      SetVariable ("rank", tostring (n))
+      say ("Now tracking promotion " .. n .. ": " .. RANKS [n].name)
+      redraw ()
+    else
+      say ("Usage: promo rank <1-4>  (1=Acolyte 2=Adept 3=Ascendant 4=Savant)",
+           "orange")
+    end
+
+  elseif a == "note" then
+    draft_note ()
+
+  elseif a == "hide" then
+    SetVariable ("hidden", "y")
+    WindowShow (win, false)
+    say ("Window hidden. 'promo show' brings it back.")
+
+  elseif a == "sync" then
+    say ("Re-checking GMCP link...")
+    DeleteVariable ("last_qp")
+    DeleteVariable ("last_qpearned")
+    poll_qp (true)
+    if not gmcp_ok then
+      say ("GMCP not reachable; text-trigger fallback active.", "orange")
+    end
+
+  elseif a == "set" and b == "joined" then
+    local y, m, d = string.match (c, "^(%d%d%d%d)-(%d%d?)-(%d%d?)$")
+    if y then
+      SetVariable ("joined_epoch", tostring (os.time {
+        year = tonumber (y), month = tonumber (m),
+        day = tonumber (d), hour = 12 }))
+      say ("Joined date set to " .. c)
+      redraw ()
+    else
+      say ("Format: promo set joined YYYY-MM-DD", "orange")
+    end
+
+  elseif a == "set" and (b == "qp" or b == "cp" or b == "gq"
+                          or b == "goals" or b == "quests") then
+    local n = tonumber (c)
+    if n then
+      setnum (b, n)
+      say (b .. " set to " .. c)
+      redraw ()
+    else
+      say ("Format: promo set " .. b .. " <number>", "orange")
+    end
+
+  elseif a == "add" and b == "qp" then
+    local n = tonumber (c)
+    if n then
+      setnum ("qp", getnum ("qp") + n)
+      say (string.format ("+%d qp (total: %d)", n, getnum ("qp")))
+      redraw ()
+    else
+      say ("Format: promo add qp <number>", "orange")
+    end
+
+  elseif a == "add" and (b == "cp" or b == "gq") then
+    setnum (b, getnum (b) + 1)
+    say (b .. " count: " .. getnum (b))
+    redraw ()
+
+  elseif a == "add" and b == "goal" then
+    setnum ("goals", getnum ("goals") + 1)
+    say ("Goals: " .. getnum ("goals"))
+    redraw ()
+
+  else
+    show_help ()
+  end
+end
+
+]]>
+</script>
+</muclient>
