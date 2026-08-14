@@ -29,8 +29,19 @@ Type `/awinv` for the full command list. Requires the Aardwolf Core plugin
 (GMCP + tag handling) from the
 [aardwolf-mudforge](https://github.com/SeanStoves/aardwolf-mudforge) suite.
 
-`dist/aw-inv.json` is the installable MudForge plugin blob built from the
-same source.
+### Install in MudForge
+
+**Settings → Plugins → Add Repository**, and give it:
+
+```
+https://raw.githubusercontent.com/Solvely-Colin/Aardwolf-Mud/main/github.com/plugins.json
+```
+
+(The catalog is served from a directory literally named `github.com` because
+MudForge's Add Repository button checks the URL *string* for that substring.)
+
+`dist/aw-inv.json` is the installable plugin blob the catalog points at,
+built from the same source.
 
 ## Boot Promotion Tracker
 
