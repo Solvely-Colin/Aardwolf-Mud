@@ -75,7 +75,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "2.0.0",
+    version     = "2.0.1",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -172,6 +172,7 @@ local ids = {
     timer    = nil,     -- pacing between ids
     guard    = nil,     -- an id that never answers
     ran      = 0,       -- ids completed this run, for the done message
+    trigs    = {},      -- the three box triggers, enabled only while an id is out
 }
 
 -- identify-box labels worth keeping, box text -> record key
@@ -754,6 +755,22 @@ local function id_guard_off()
     if ids.guard ~= nil then pcall(removeTimer, ids.guard); ids.guard = nil end
 end
 
+--[[
+    The box triggers include one that matches every line ("first line that
+    is neither | nor +"). They exist only to close a box we asked for, so
+    they are switched on for the flight of one id and off again after —
+    the rest of the session they never run at all.
+]]
+local function id_trigs(onoff)
+    for _, h in ipairs(ids.trigs) do
+        if onoff == true then
+            pcall(enableTrigger, h)
+        else
+            pcall(disableTrigger, h)
+        end
+    end
+end
+
 -- forward-declared: id_store schedules the next send
 local id_next = nil
 
@@ -762,6 +779,7 @@ local function id_store()
     ids.rec = nil
     ids.modBlock = ""
     id_guard_off()
+    id_trigs(false)
 
     local serial = ids.pending
     ids.pending = ""
@@ -806,6 +824,7 @@ id_next = function()
     end
 
     ids.pending = serial
+    id_trigs(true)
     send("id " .. serial)
 
     id_guard_off()
@@ -814,6 +833,7 @@ id_next = function()
         if ids.pending == serial and type(ids.rec) ~= "table" then
             utilprint(TAGR .. "no id box for " .. serial .. " - skipped.")
             ids.pending = ""
+            id_trigs(false)
             id_next()
         end
     end)
@@ -1727,15 +1747,18 @@ function init()
 
     --[[
         The identify box, aw-loot's patterns: Keywords opens it, | and +
-        rows feed it, the first line that is neither closes it. Both
-        plugins read the same boxes; neither gags them.
+        rows feed it, the first line that is neither closes it. Registered
+        disabled and switched on only while one of OUR ids is in flight —
+        the close pattern matches every ordinary line, and a handler that
+        runs on all of them all session long is exposure with no payoff.
     ]]
-    addTrigger("^\\| Keywords\\s+:\\s*(.+?)\\s*\\|$", on_id_open,
-        { type = "regex", priority = 45, keepEvaluating = true })
-    addTrigger("^[|+](.*)$", on_id_row,
-        { type = "regex", priority = 45, keepEvaluating = true })
-    addTrigger("^[^|+].*$", on_id_close,
-        { type = "regex", priority = 45, keepEvaluating = true })
+    ids.trigs = {}
+    table.insert(ids.trigs, addTrigger("^\\| Keywords\\s+:\\s*(.+?)\\s*\\|$", on_id_open,
+        { type = "regex", priority = 45, keepEvaluating = true, enabled = false }))
+    table.insert(ids.trigs, addTrigger("^[|+](.*)$", on_id_row,
+        { type = "regex", priority = 45, keepEvaluating = true, enabled = false }))
+    table.insert(ids.trigs, addTrigger("^[^|+].*$", on_id_close,
+        { type = "regex", priority = 45, keepEvaluating = true, enabled = false }))
 
     addTrigger("^You wake and stand up\\.$", on_wake,
         { type = "regex", priority = 45, keepEvaluating = true })
@@ -1821,7 +1844,27 @@ function init()
 
         if low == "" or low == "show" then
             showWidget(widget)
+            pcall(setWidgetAppearance, widget, { zIndex = 9999 })
             render()
+            utilprint(TAG .. "panel up (" .. count_where("eq") .. " worn, "
+                .. count_where("inv") .. " carried). Not visible? /awinv reset.")
+
+        elseif low == "reset" then
+            --[[
+                Saved geometry wins over createWidget defaults, and a widget
+                can be restored off-screen or under another panel — visible
+                by every measure and impossible to see. Put it somewhere
+                known. The movers are pcall'd: names beyond resizeWidget
+                vary by build, and a mover this client lacks should cost
+                nothing.
+            ]]
+            pcall(resizeWidget, widget, 460, 520)
+            pcall(moveWidget, widget, 120, 120)
+            pcall(setWidgetProperty, widget, "position", { x = 120, y = 120 })
+            pcall(setWidgetAppearance, widget, { zIndex = 9999 })
+            showWidget(widget)
+            render()
+            utilprint(TAG .. "panel fronted at 120,120 sized 460x520.")
 
         elseif low == "hide" then
             hideWidget(widget)
@@ -1872,6 +1915,7 @@ function init()
                 ids.pending = ""
                 ids.rec = nil
                 id_guard_off()
+                id_trigs(false)
                 utilprint(TAG .. "identify queue emptied.")
             elseif what == "all" or what == "missing" then
                 local added = id_queue(what)

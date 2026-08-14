@@ -2,6 +2,15 @@
 
 MUSHclient and MudForge plugins for [Aardwolf](https://www.aardwolf.com/).
 
+## Boot Promotion Tracker (MudForge)
+
+`aw-bootpromo.lua` (v2.0.0) is the MudForge port of the MUSHclient tracker
+below: the four Boot Lyceum promotion tiers as live progress bars — days in
+clan, QP earned, campaigns (+gquest wins), goals done. Self-seeding the same
+way: type `whois` and `score` and the stats sync from the game's own ledger;
+GMCP keeps QP live in between. `promo help` for commands; the only manual
+input is `promo set joined YYYY-MM-DD`.
+
 ## Aardwolf Inventory (MudForge)
 
 `aw-inv.lua` (v2.0.0) is a ground-up MudForge rewrite of Durel's Inventory

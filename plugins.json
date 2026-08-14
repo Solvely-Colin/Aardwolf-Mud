@@ -1,22 +1,36 @@
 {
   "schemaVersion": 1,
   "name": "Catdad's Aardwolf Plugins",
-  "description": "Aardwolf plugins for MudForge: inventory management with identify database, gear scoring and best-in-slot.",
+  "description": "Aardwolf plugins for MudForge: inventory management with identify database and gear scoring, and the Boot Lyceum promotion tracker.",
   "homepage": "https://github.com/Solvely-Colin/Aardwolf-Mud",
   "generated": "2026-08-14T00:00:00Z",
-  "pluginCount": 1,
+  "pluginCount": 2,
   "plugins": [
     {
       "id": "aw-inv",
       "name": "Aardwolf Inventory",
-      "version": "2.0.0",
+      "version": "2.0.1",
       "author": "Catdad",
       "description": "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
       "category": "widgets",
       "downloadUrl": "https://raw.githubusercontent.com/Solvely-Colin/Aardwolf-Mud/main/dist/aw-inv.json",
       "format": "json",
-      "sha256": "4d53a93b6b0633e9ec31056e10ab6aed2c8838b4b61ce53c7b6b30c4cfe51790",
-      "size": 80566,
+      "sha256": "fdf8da722ba813a7af214e6513b6d46a360ffd97bfcd5955c5aa9498ba47a1aa",
+      "size": 82677,
+      "license": "MIT",
+      "homepage": "https://github.com/Solvely-Colin/Aardwolf-Mud"
+    },
+    {
+      "id": "aw-bootpromo",
+      "name": "Boot Promotion Tracker",
+      "version": "2.0.0",
+      "author": "Catdad",
+      "description": "Boot Lyceum promotion progress - days in clan, QP, campaigns and goals against each tier's bar.",
+      "category": "widgets",
+      "downloadUrl": "https://raw.githubusercontent.com/Solvely-Colin/Aardwolf-Mud/main/dist/aw-bootpromo.json",
+      "format": "json",
+      "sha256": "5076e8db34a62b562963e1da9603f607bb2afc6851d8447a59209de5bbe6f044",
+      "size": 23832,
       "license": "MIT",
       "homepage": "https://github.com/Solvely-Colin/Aardwolf-Mud"
     }
