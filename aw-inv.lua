@@ -77,7 +77,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "2.1.2",
+    version     = "2.1.3",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -1958,6 +1958,10 @@ function init()
                 the blocks never arrived (or the openers never matched);
                 rows without parsed means the CSV shape surprised us.
             ]]
+            -- version first: chasing a bug that was already fixed on disk
+            -- costs rounds you cannot get back (MUDFORGE-NOTES, verbatim)
+            utilprint(TAG .. "aw-inv v" .. plugin.version
+                .. " | find base adj " .. FIND_ADJ)
             local nItems = 0
             for _, _x in pairs(db.items) do nItems = nItems + 1 end
             local nStats = 0
