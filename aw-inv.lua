@@ -75,7 +75,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "2.0.1",
+    version     = "2.0.2",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -268,10 +268,17 @@ local function drop_handlers(id, event)
     if ok and type(fn) == "function" then pcall(fn, id, event) end
 end
 
+--[[
+    The panel's base font as a CSS length. A pinned size (/awinv font, or
+    the suite's /awcore font) is exact pixels; auto scales with the panel
+    itself — the iframe's viewport IS the widget, so vmin units track its
+    size live as it is resized, with a clamp so a tiny or huge panel stays
+    readable. Inline font-size is geometry to the sanitiser and survives.
+]]
 local function font_base()
-    if cfg.fov >= 6 and cfg.fov <= 48 then return cfg.fov end
-    if cfg.fpx >= 6 and cfg.fpx <= 48 then return cfg.fpx end
-    return 10
+    if cfg.fov >= 6 and cfg.fov <= 48 then return cfg.fov .. "px" end
+    if cfg.fpx >= 6 and cfg.fpx <= 48 then return cfg.fpx .. "px" end
+    return "clamp(9px, 2.2vmin, 20px)"
 end
 
 --[[
@@ -1447,7 +1454,7 @@ render = function()
         .. '" data-mud-action="view" title="settings">&#9881;</div>'
 
     setWidgetProperty(widget, "content", CSS_HEAD
-        .. '<div class="arc-i" style="font-size:' .. font_base() .. 'px">'
+        .. '<div class="arc-i" style="font-size:' .. font_base() .. '">'
         .. '<div class="bar">' .. bar .. "</div>"
         .. '<div class="body">' .. body .. "</div></div>")
 end
@@ -2097,7 +2104,7 @@ function init()
             render()
             utilprint(TAG .. "font "
                 .. (cfg.fov >= 6 and (cfg.fov .. "px for this panel.")
-                    or "follows the suite (/awcore font)."))
+                    or "auto - scales with the panel (/awcore font can still pin the suite size)."))
 
         else
             utilprint(TAG .. "inventory, worn, keyring and vault in one panel.")

@@ -27,7 +27,7 @@
 plugin = {
     id          = "aw-bootpromo",
     name        = "Boot Promotion Tracker",
-    version     = "2.0.0",
+    version     = "2.0.1",
     author      = "Catdad",
     description = "Boot Lyceum promotion progress - days in clan, QP, campaigns and goals against each tier's bar.",
     settings    = { saveState = true },
@@ -82,10 +82,12 @@ local function drop_handlers(id, event)
     if ok and type(fn) == "function" then pcall(fn, id, event) end
 end
 
+-- pinned px if set; otherwise scale with the panel itself (the iframe's
+-- viewport is the widget, so vmin tracks a resize live), clamped readable
 local function font_base()
-    if cfg.fov >= 6 and cfg.fov <= 48 then return cfg.fov end
-    if cfg.fpx >= 6 and cfg.fpx <= 48 then return cfg.fpx end
-    return 10
+    if cfg.fov >= 6 and cfg.fov <= 48 then return cfg.fov .. "px" end
+    if cfg.fpx >= 6 and cfg.fpx <= 48 then return cfg.fpx .. "px" end
+    return "clamp(10px, 3.2vmin, 20px)"
 end
 
 local function cap(c, w, n)
@@ -300,7 +302,7 @@ render = function()
         .. '" data-mud-action="view" title="settings">&#9881;</div>'
 
     setWidgetProperty(widget, "content", CSS_HEAD
-        .. '<div class="arc-p" style="font-size:' .. font_base() .. 'px">'
+        .. '<div class="arc-p" style="font-size:' .. font_base() .. '">'
         .. '<div class="bar">' .. bar .. "</div>"
         .. '<div class="body">' .. body .. "</div></div>")
 end
@@ -610,7 +612,7 @@ function init()
             render()
             utilprint(TAG .. "font "
                 .. (cfg.fov >= 6 and (cfg.fov .. "px for this panel.")
-                    or "follows the suite (/awcore font)."))
+                    or "auto - scales with the panel (/awcore font can still pin the suite size)."))
 
         else
             show_help()
