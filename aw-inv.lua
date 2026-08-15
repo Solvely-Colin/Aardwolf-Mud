@@ -77,7 +77,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "2.4.1",
+    version     = "2.4.2",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -1670,10 +1670,29 @@ end
     list that only looked at "inv" missed worn packs entirely and never
     recursed, so their contents stayed invisible.
 ]]
+--[[
+    Is this a container? The invdata CSV's type column says 11, but dinv
+    never trusted that column — it read the identify box's Type field and
+    compared the word "Container". Take either: the CSV number when that
+    is all we have, the identified word once we have it. A bag missed
+    here is a bag whose contents are never scanned.
+]]
+local function is_container(serial)
+    local it = db.items[serial]
+    if type(it) ~= "table" then return false end
+    if it.itype == 11 then return true end
+    local r = ids.stats[serial]
+    if type(r) == "table" and type(r.itype) == "string"
+        and string.lower(trim(r.itype)) == "container" then
+        return true
+    end
+    return false
+end
+
 local function container_list()
     local out = {}
-    for _, it in pairs(db.items) do
-        if type(it) == "table" and it.itype == 11
+    for serial, it in pairs(db.items) do
+        if type(it) == "table" and is_container(serial)
             and (it.where == "inv" or it.where == "eq"
                  or pfind(it.where, "c:") == 1) then
             table.insert(out, it)
@@ -1858,6 +1877,7 @@ local MENU = {
     { g = "Scan",     l = "build",        c = "build",        t = "full rescan, then identify everything unknown" },
     { g = "Scan",     l = "refresh",      c = "refresh",      t = "rescan eq, inventory, containers and keyring" },
     { g = "Scan",     l = "+ vault",      c = "vault",        t = "rescan including the vault (needs a vault here)" },
+    { g = "Scan",     l = "bags",         c = "bags",         t = "which containers are known, and what is in them" },
     { g = "Scan",     l = "id missing",   c = "id missing",   t = "identify everything with no stats yet" },
     { g = "Scan",     l = "id all",       c = "id all",       t = "re-identify everything, even known items" },
     { g = "Scan",     l = "id stop",      c = "id stop",      t = "halt the identify pass" },
@@ -2711,6 +2731,29 @@ function init()
             if mud ~= "" then
                 send(mud)
                 addTimer(600, function() refresh(false) end)
+            end
+
+        elseif low == "bags" then
+            --[[
+                What the scan believes about containers, and why none were
+                found if none were. A bag lives in inventory or is worn; a
+                scan can only see what invdata/eqdata listed.
+            ]]
+            local cons = container_list()
+            utilprint(TAG .. #cons .. " container(s) known.")
+            for _, it in ipairs(cons) do
+                utilprint("$w  " .. it.serial .. "  $C" .. it.name
+                    .. "$w  (" .. it.where .. ")  "
+                    .. count_where("c:" .. it.serial) .. " item(s) inside")
+            end
+            if #cons == 0 then
+                utilprint("$K  Nothing of type Container was listed by 'invdata' "
+                    .. "or 'eqdata'. Bags are found from your main inventory or "
+                    .. "worn gear - if yours live somewhere else, run "
+                    .. "'/awinv scan <serial>' on one to index it directly.$w")
+                utilprint("$K  Carried right now: " .. count_where("inv")
+                    .. " item(s). If that is 0 but you are carrying bags, "
+                    .. "paste what 'i' shows and I'll fix the detection.$w")
             end
 
         elseif string.sub(low, 1, 5) == "scan " then
