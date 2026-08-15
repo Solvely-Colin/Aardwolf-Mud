@@ -75,7 +75,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "2.0.4",
+    version     = "2.0.5",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -1475,7 +1475,6 @@ local function block_release()
     st.inId    = ""
     st.mine    = false
     st.buf     = {}
-    if rowTrig ~= nil then pcall(disableTrigger, rowTrig) end
 end
 
 local function send_next_scan()
@@ -1538,8 +1537,6 @@ local function open_kind(kind, tagname)
     end
     if st.inBlock == "key" then db.haveKey = true end
     if st.inBlock == "vault" then db.haveVault = true end
-
-    if rowTrig ~= nil then pcall(enableTrigger, rowTrig) end
 
     if st.blockTimer ~= nil then pcall(removeTimer, st.blockTimer) end
     st.blockTimer = addTimer(BLOCK_MS, function()
@@ -1744,29 +1741,40 @@ function init()
         the block starts would not see the rest of the packet it started in,
         and these blocks arrive whole.
     ]]
+    --[[
+        Always enabled, gated on st.inBlock inside the handler — spellups'
+        row reader runs the same way. Rows inside {invdata} are lines Core
+        gags, and the enable/disable dance added nothing but another way
+        to be wrong about when the trigger could see them.
+    ]]
     rowTrig = addTrigger("*", on_row, {
         type           = "wildcard",
-        priority       = 40,
         keepEvaluating = true,
-        enabled        = false,
     })
 
+    --[[
+        keepEvaluating = true and NO explicit priority, copied from
+        aw-spellup's spellheaders readers — the one shape measured to see
+        lines Core is gagging. Two failed builds bracketed this: capturing
+        alternation never matched at all, and a priority-70 trigger without
+        keepEvaluating never saw a line the priority-90 gag had discarded.
+    ]]
     addTrigger("^\\{eqdata\\}", function(c, l, w) return open_kind("eq", "eqdata") end,
-        { type = "regex", priority = 70 })
+        { type = "regex", keepEvaluating = true })
     addTrigger("^\\{invdata\\}", function(c, l, w) return open_kind("inv", "invdata") end,
-        { type = "regex", priority = 70 })
+        { type = "regex", keepEvaluating = true })
     addTrigger("^\\{keyring\\}", function(c, l, w) return open_kind("key", "keyring") end,
-        { type = "regex", priority = 70 })
+        { type = "regex", keepEvaluating = true })
     addTrigger("^\\{vault\\}", function(c, l, w) return open_kind("vault", "vault") end,
-        { type = "regex", priority = 70 })
+        { type = "regex", keepEvaluating = true })
     addTrigger("^\\{/(?:invdata|eqdata|keyring|vault)\\}", on_close,
-        { type = "regex", priority = 70 })
+        { type = "regex", keepEvaluating = true })
     addTrigger("^\\{vaultcounts\\}([0-9]+),([0-9]+),([0-9]+)", on_vaultcounts,
-        { type = "regex", priority = 70 })
+        { type = "regex", keepEvaluating = true })
     addTrigger("^\\{invmon\\}", on_invmon,
-        { type = "regex", priority = 40 })
+        { type = "regex", keepEvaluating = true })
     addTrigger("^You dream about (?:being able to keyring|checking your vault)\\.$",
-        on_dream, { type = "regex", priority = 40 })
+        on_dream, { type = "regex", keepEvaluating = true })
 
     --[[
         The identify box, aw-loot's patterns: Keywords opens it, | and +
@@ -1777,14 +1785,14 @@ function init()
     ]]
     ids.trigs = {}
     table.insert(ids.trigs, addTrigger("^\\| Keywords\\s+:\\s*(.+?)\\s*\\|$", on_id_open,
-        { type = "regex", priority = 45, enabled = false }))
+        { type = "regex", keepEvaluating = true, enabled = false }))
     table.insert(ids.trigs, addTrigger("^[|+](.*)$", on_id_row,
-        { type = "regex", priority = 45, enabled = false }))
+        { type = "regex", keepEvaluating = true, enabled = false }))
     table.insert(ids.trigs, addTrigger("^[^|+].*$", on_id_close,
-        { type = "regex", priority = 45, enabled = false }))
+        { type = "regex", keepEvaluating = true, enabled = false }))
 
     addTrigger("^You wake and stand up\\.$", on_wake,
-        { type = "regex", priority = 45 })
+        { type = "regex", keepEvaluating = true })
 
     drop_handlers(widget, "action")
     registerWidgetEvent(widget, "action", function(data)
