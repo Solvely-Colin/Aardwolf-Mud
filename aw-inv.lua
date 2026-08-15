@@ -77,7 +77,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "2.3.0",
+    version     = "2.4.0",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -216,6 +216,10 @@ local ID_FIELDS = {
     ["Inflicts"]    = "inflicts",
     ["Damage Type"] = "dam_type",
     ["Capacity"]    = "capacity",
+    ["Affect Mods"] = "affects",
+    ["Owned By"]    = "owned_by",
+    ["Clan Item"]   = "clan",
+    ["Specials"]    = "specials",
 }
 
 -- "Label : +N" stat and resist mods, box text -> stat key
@@ -239,11 +243,15 @@ local STAT_MAP = {
     box's Wearable field uses. Anything it says that isn't here still gets
     a slot of its own, capacity one — guessing wrong costs a row, not data.
 ]]
+-- how many of each a body has, from dinv's inv.wearables. Medals are FOUR
+-- slots and ears, necks, wrists and fingers are two apiece; a table that
+-- said one of each quietly hid half your gear from the best list.
 local SLOT_CAP = {
-    light = 1, finger = 2, neck = 2, body = 1, head = 1, legs = 1, feet = 1,
-    hands = 1, arms = 1, shield = 1, about = 1, waist = 1, wrist = 2,
-    wield = 1, hold = 1, float = 1, ear = 2, eyes = 1, back = 1,
-    medal = 1, sleeves = 1, ankle = 2,
+    light = 1, head = 1, eyes = 1, ear = 2, neck = 2, back = 1,
+    medal = 4, torso = 1, body = 1, waist = 1, arms = 1, wrist = 2,
+    hands = 1, finger = 2, legs = 1, feet = 1, shield = 1,
+    wield = 2, hold = 1, float = 1, above = 1, portal = 1,
+    sleeping = 1, ready = 1,
 }
 
 --[[
@@ -251,14 +259,40 @@ local SLOT_CAP = {
     flat in storage; live it is sets[name][stat] = weight. The defaults are
     starting points, not doctrine — edit with /awinv prio.
 ]]
+--[[
+    The class profiles are dinv's own defaults, which are in turn ports of
+    Aardwolf's 'compare set' class weightings divided by ten (str 10 →
+    1.0). They differ only in the six stats; hit/dam/avedam are common.
+
+    'melee' and 'defense' follow dinv's hand-tuned demonstrations, where
+    the point is that EFFECTS carry large flat weights — sanctuary at 50
+    beats any amount of +str — and that a weight may be negative when you
+    want less of something.
+]]
 local prof = {
-    active = "damage",
+    active = "psi",
     sets = {
-        damage   = { dam = 10, hit = 5, str = 2, dex = 1 },
-        caster   = { intel = 5, wis = 4, mana = 3, luck = 1, hp = 1 },
-        tank     = { con = 5, hp = 4, all_phys = 3, all_magic = 3 },
-        balanced = { str = 1, intel = 1, wis = 1, dex = 1, con = 1, luck = 1,
-                     hp = 2, mana = 2, hit = 2, dam = 2 },
+        psi      = { str = 1.0, intel = 1.5, wis = 1.5, dex = 1.0, con = 1.0, luck = 1.2,
+                     hit = 0.5, dam = 0.5, ave_dam = 0.4 },
+        mage     = { str = 1.0, intel = 1.5, wis = 1.0, dex = 1.0, con = 1.0, luck = 1.0,
+                     hit = 0.5, dam = 0.5, ave_dam = 0.4 },
+        cleric   = { str = 1.0, intel = 1.0, wis = 1.5, dex = 1.0, con = 1.0, luck = 1.0,
+                     hit = 0.5, dam = 0.5, ave_dam = 0.4 },
+        warrior  = { str = 1.5, intel = 1.0, wis = 1.0, dex = 1.5, con = 1.0, luck = 1.0,
+                     hit = 0.5, dam = 0.5, ave_dam = 0.4 },
+        thief    = { str = 1.2, intel = 1.0, wis = 1.0, dex = 1.5, con = 1.0, luck = 1.0,
+                     hit = 0.5, dam = 0.5, ave_dam = 0.4 },
+        ranger   = { str = 1.0, intel = 1.0, wis = 1.5, dex = 1.0, con = 1.5, luck = 1.0,
+                     hit = 0.5, dam = 0.5, ave_dam = 0.4 },
+        paladin  = { str = 1.0, intel = 1.5, wis = 1.0, dex = 1.0, con = 1.5, luck = 1.0,
+                     hit = 0.5, dam = 0.5, ave_dam = 0.4 },
+
+        melee    = { str = 1, intel = 0.6, wis = 0.6, dex = 0.8, con = 0.2, luck = 1,
+                     dam = 0.9, hit = 0.4, ave_dam = 0.9, hp = 0.02, mana = 0.01,
+                     sanctuary = 50, haste = 20, invis = 10, flying = 5,
+                     regeneration = 5, all_magic = 0.03, all_phys = 0.03 },
+        defense  = { con = 1, hp = 0.05, sanctuary = 10, regeneration = 5,
+                     all_phys = 0.10, all_magic = 0.05 },
     },
 }
 
@@ -357,7 +391,7 @@ local function csv_fields(s)
     local guard = 0
     while guard < 300 do
         guard = guard + 1
-        local p = pfind(rest, ",", 1, true)
+        local p = pfind(rest, ",")
         if p == nil then
             table.insert(out, rest)
             return out
@@ -429,7 +463,7 @@ local function split_cols(s)
     local guard = 0
     while guard < 60 do
         guard = guard + 1
-        local p = pfind(rest, "  ", 1, true)
+        local p = pfind(rest, "  ")
         if p == nil then
             if trim(rest) ~= "" then table.insert(out, trim(rest)) end
             return out
@@ -464,7 +498,7 @@ end
 local function parse_row(line, where)
     local s = trim(line)
 
-    local p1 = pfind(s, ",", 1, true)
+    local p1 = pfind(s, ",")
     if p1 == nil or p1 < 7 then
         st.rej = "no-serial: " .. string.sub(s, 1, 60)
         return false
@@ -476,7 +510,7 @@ local function parse_row(line, where)
     end
 
     local rest = string.sub(s, p1 + 1)
-    local p2 = pfind(rest, ",", 1, true)
+    local p2 = pfind(rest, ",")
     if p2 == nil then
         st.rej = "no-flags: " .. string.sub(s, 1, 60)
         return false
@@ -490,7 +524,7 @@ local function parse_row(line, where)
     local guard = 0
     while guard < 300 do
         guard = guard + 1
-        local q = pfind(string.sub(rest, off + 1), ",", 1, true)
+        local q = pfind(string.sub(rest, off + 1), ",")
         if q == nil then break end
         off = off + q
         c1 = c2
@@ -579,7 +613,7 @@ local function load_db()
     while rest ~= "" and guard < 5000 do
         guard = guard + 1
         local line = rest
-        local p = pfind(rest, "\n", 1, true)
+        local p = pfind(rest, "\n")
         if p == nil then
             rest = ""
         else
@@ -592,7 +626,7 @@ local function load_db()
         local g2 = 0
         while g2 < 12 do
             g2 = g2 + 1
-            local q = pfind(rest2, "\t", 1, true)
+            local q = pfind(rest2, "\t")
             if q == nil then
                 table.insert(f, rest2)
                 rest2 = ""
@@ -658,7 +692,7 @@ local function load_stats()
     while rest ~= "" and guard < 8000 do
         guard = guard + 1
         local line = rest
-        local p = pfind(rest, "\n", 1, true)
+        local p = pfind(rest, "\n")
         if p == nil then
             rest = ""
         else
@@ -673,7 +707,7 @@ local function load_stats()
         while rest2 ~= "" and g2 < 80 do
             g2 = g2 + 1
             local field = rest2
-            local q = pfind(rest2, "\t", 1, true)
+            local q = pfind(rest2, "\t")
             if q == nil then
                 rest2 = ""
             else
@@ -684,7 +718,7 @@ local function load_stats()
             if serial == "" then
                 serial = trim(field)
             else
-                local eq = pfind(field, "=", 1, true)
+                local eq = pfind(field, "=")
                 if eq ~= nil and eq > 1 then
                     local k = string.sub(field, 1, eq - 1)
                     local v = string.sub(field, eq + 1)
@@ -735,7 +769,7 @@ local function load_prof()
     while rest ~= "" and guard < 100 do
         guard = guard + 1
         local part = rest
-        local p = pfind(rest, "|", 1, true)
+        local p = pfind(rest, "|")
         if p == nil then
             rest = ""
         else
@@ -747,7 +781,7 @@ local function load_prof()
             first = false
             if trim(part) ~= "" then prof.active = trim(part) end
         else
-            local c = pfind(part, ":", 1, true)
+            local c = pfind(part, ":")
             if c ~= nil and c > 1 then
                 local name = string.sub(part, 1, c - 1)
                 local ws = {}
@@ -756,14 +790,14 @@ local function load_prof()
                 while rest2 ~= "" and g2 < 80 do
                     g2 = g2 + 1
                     local kv = rest2
-                    local q = pfind(rest2, ",", 1, true)
+                    local q = pfind(rest2, ",")
                     if q == nil then
                         rest2 = ""
                     else
                         kv = string.sub(rest2, 1, q - 1)
                         rest2 = string.sub(rest2, q + 1)
                     end
-                    local eq = pfind(kv, "=", 1, true)
+                    local eq = pfind(kv, "=")
                     if eq ~= nil and eq > 1 then
                         local w = tonumber(string.sub(kv, eq + 1))
                         if w ~= nil then ws[string.sub(kv, 1, eq - 1)] = w end
@@ -786,6 +820,180 @@ local function load_qol()
     if type(saved) ~= "table" then return end
     if type(saved.regen) == "string" then qol.regen = saved.regen end
     if type(saved.regenPrev) == "string" then qol.regenPrev = saved.regenPrev end
+end
+
+---
+-- query language, dinv's inv.query
+--
+-- "key value" pairs AND'd together, "||" between OR groups, min/max
+-- prefixes on numbers, "~" to negate, a bare word matching the name, and
+-- the special words all/worn/carried. This is what makes get, put,
+-- keyword and forget worth having: one grammar, every command.
+--
+--     dagger                       name contains "dagger"
+--     type weapon minlevel 100     both must hold
+--     wearable finger || type ring one or the other
+--     ~flags K minlevel 50         not kept, level 50+
+---
+
+-- one field of the merged item + identify record, as text or number
+local function q_field(serial, key)
+    local it = db.items[serial]
+    if type(it) ~= "table" then return nil end
+    local r = ids.stats[serial]
+    if type(r) ~= "table" then r = {} end
+
+    if key == "name" or key == "n" then return it.name end
+    if key == "level" or key == "lvl" then return it.level end
+    if key == "serial" or key == "id" or key == "objid" then return it.serial end
+    if key == "flags" or key == "flag" then return it.flags end
+    if key == "timer" then return it.timer end
+    if key == "unique" then return it.unique end
+    if key == "loc" or key == "location" or key == "where" then return it.where end
+    if key == "type" then
+        local tn = TYPE_NAME[it.itype]
+        if type(tn) == "string" then return tn end
+        return tostring(it.itype)
+    end
+    if key == "score" then
+        local sc = score_of(serial)
+        if sc == nil then return 0 end
+        return sc
+    end
+    if key == "slot" or key == "wearloc" then return slot_of(serial) end
+    if key == "kw" or key == "tag" then return tostring(r.tags or "") end
+
+    -- identify fields and stat mods share the record, so one lookup covers
+    -- wearable/material/worth/weight/damtype/... and str/int/hit/dam/...
+    local v = r[key]
+    if v ~= nil then return v end
+
+    -- a few spellings the box uses that a player would not type
+    if key == "damtype" then return r.dam_type end
+    if key == "weapontype" then return r.weapon_type end
+    if key == "avedam" then return r.ave_dam end
+    if key == "leadsto" then return r.leads_to end
+    if key == "foundat" then return r.found_at end
+    if key == "allphys" then return r.all_phys end
+    if key == "allmagic" then return r.all_magic end
+    return nil
+end
+
+-- does one "key value" term hold for this item?
+local function q_term(serial, key, val)
+    local neg = false
+    if string.sub(key, 1, 1) == "~" then
+        neg = true
+        key = string.sub(key, 2)
+    end
+
+    local mode = ""
+    if string.sub(key, 1, 3) == "min" and #key > 3 then
+        mode = "min"
+        key = string.sub(key, 4)
+    elseif string.sub(key, 1, 3) == "max" and #key > 3 then
+        mode = "max"
+        key = string.sub(key, 4)
+    end
+
+    local got = q_field(serial, key)
+    local hit = false
+
+    if got ~= nil then
+        local gn = tonumber(got)
+        local vn = tonumber(val)
+        if mode == "min" then
+            hit = (gn ~= nil and vn ~= nil and gn >= vn)
+        elseif mode == "max" then
+            hit = (gn ~= nil and vn ~= nil and gn <= vn)
+        elseif gn ~= nil and vn ~= nil then
+            hit = (gn == vn)
+        else
+            hit = pfind(string.lower(tostring(got)), string.lower(val)) ~= nil
+        end
+    end
+
+    if neg then return not hit end
+    return hit
+end
+
+--[[
+    Does this item match the query? Walked by slicing rather than split
+    into tables: the same runtime that collects find's returns into an
+    array is not one to hand a parser more structure than it needs.
+]]
+local function q_match(serial, query)
+    local q = trim(string.lower(query))
+    local it = db.items[serial]
+    if type(it) ~= "table" then return false end
+
+    if q == "" or q == "carried" then
+        return it.where ~= "eq"
+    end
+    if q == "all" then return true end
+    if q == "worn" then return it.where == "eq" end
+
+    -- OR groups first: any group matching is a match
+    local rest = q
+    local guard = 0
+    while guard < 40 do
+        guard = guard + 1
+
+        local group = rest
+        local bar = pfind(rest, "||")
+        if bar == nil then
+            rest = ""
+        else
+            group = string.sub(rest, 1, bar - 1)
+            rest = string.sub(rest, bar + 2)
+        end
+
+        -- every term in the group must hold
+        local ok = true
+        local words = {}
+        for word in string.gmatch(group, "%S+") do
+            table.insert(words, word)
+        end
+
+        local i = 1
+        while i <= #words do
+            local key = words[i]
+            local isKey = (q_field(serial, key) ~= nil)
+                or string.sub(key, 1, 1) == "~"
+                or string.sub(key, 1, 3) == "min"
+                or string.sub(key, 1, 3) == "max"
+
+            if isKey and i < #words then
+                if not q_term(serial, key, words[i + 1]) then ok = false end
+                i = i + 2
+            else
+                -- a bare word matches the name
+                if pfind(string.lower(it.name), key) == nil then ok = false end
+                i = i + 1
+            end
+        end
+
+        if ok and #words > 0 then return true end
+        if rest == "" then return false end
+    end
+    return false
+end
+
+-- every indexed serial matching a query, worn items last so a list reads
+-- the way the game shows it
+local function q_find(query)
+    local out = {}
+    for serial, it in pairs(db.items) do
+        if type(it) == "table" and q_match(serial, query) then
+            table.insert(out, serial)
+        end
+    end
+    table.sort(out, function(x, y)
+        local a, b = db.items[x], db.items[y]
+        if a.where ~= b.where then return a.where < b.where end
+        return a.name < b.name
+    end)
+    return out
 end
 
 ---
@@ -849,7 +1057,7 @@ local function id_line(body)
 
     -- plain "Label : value" pairs, two to a row, split on column padding
     for _, chunk in ipairs(split_cols(body)) do
-        local c = pfind(chunk, ":", 1, true)
+        local c = pfind(chunk, ":")
         if c ~= nil and c > 1 then
             local label = trim(string.sub(chunk, 1, c - 1))
             local value = trim(string.sub(chunk, c + 1))
@@ -908,6 +1116,19 @@ local function id_store()
 
     if type(r) == "table" and serial ~= "" then
         r.at = stamp()
+
+        --[[
+            Affect Mods is a word list — sanctuary, regeneration, flying,
+            detect invis — and dinv turns each word into a flag of its own
+            so a query can ask for one by name. That is how it finds a
+            regen ring without being told which item it is.
+        ]]
+        if type(r.affects) == "string" and r.affects ~= "" then
+            local words = string.gsub(string.lower(r.affects), ",", " ")
+            for wd in string.gmatch(words, "%a+") do
+                r["aff_" .. wd] = 1
+            end
+        end
         -- keep what an older record had that this box didn't mention
         local old = ids.stats[serial]
         if type(old) == "table" then
@@ -960,6 +1181,10 @@ id_next = function()
         if it2.where == "eq" then
             ids.restore = "wear " .. serial
             send("remove " .. serial)
+        elseif it2.where == "key" then
+            -- the keyring has its own verbs; dinv uses exactly these
+            ids.restore = "keyring put " .. serial
+            send("keyring get " .. serial)
         elseif pfind(it2.where, "c:") == 1 then
             local con = string.sub(it2.where, 3)
             ids.restore = "put " .. serial .. " " .. con
@@ -984,14 +1209,47 @@ id_next = function()
     end)
 end
 
+--[[
+    Queue items for identify. Vault contents are deliberately excluded —
+    dinv marks vault identification unsupported outright, and an id that
+    can never answer just burns the guard timer per item.
+
+    Consumables are identified ONCE PER NAME, not per object: dinv keeps a
+    "frequent" cache keyed on name for potions, pills, food, wands, staves
+    and scrolls, because a hundred bought potions are the same item a
+    hundred times and identifying each is a hundred pointless round trips.
+]]
+local FUNGIBLE = { [8] = true, [19] = true, [14] = true,
+                   [3] = true, [4] = true, [2] = true }
+
 local function id_queue(which)
     local added = 0
+    local seenName = {}
+
+    -- names already identified, so a fresh potion of a known kind is skipped
+    for s2, r2 in pairs(ids.stats) do
+        if type(r2) == "table" then
+            local i2 = db.items[s2]
+            if type(i2) == "table" and FUNGIBLE[i2.itype] == true then
+                seenName[string.lower(i2.name)] = true
+            end
+        end
+    end
+
     for serial, it in pairs(db.items) do
         if type(it) == "table" and (it.where == "inv" or it.where == "eq"
-            or pfind(it.where, "c:", 1, true) == 1) then
+            or it.where == "key" or pfind(it.where, "c:") == 1) then
+
             local known = type(ids.stats[serial]) == "table"
+            local nm = string.lower(it.name)
+
+            if FUNGIBLE[it.itype] == true and which ~= "all" and seenName[nm] then
+                known = true          -- one of these is every one of these
+            end
+
             if which == "all" or (which == "missing" and not known) then
                 table.insert(ids.q, serial)
+                if FUNGIBLE[it.itype] == true then seenName[nm] = true end
                 added = added + 1
             end
         end
@@ -1015,7 +1273,7 @@ end
 
 local function on_id_close(c, line, w)
     if type(ids.rec) ~= "table" then return end
-    if pfind(tostring(line or ""), "full appraisal", 1, true) ~= nil then
+    if pfind(tostring(line or ""), "full appraisal") ~= nil then
         ids.rec.full = 0
     end
     id_store()
@@ -1024,6 +1282,28 @@ end
 ---
 -- scoring, dinv's priority/score, and the best-per-slot answer
 ---
+
+--[[
+    dinv's scoring kernel, as measured from inv.score.extended:
+
+      score = SUM over weighted keys of (weight x stat value)
+
+    with two additions beyond plain stat mods.
+
+    EFFECTS are flat: an item either has sanctuary or it does not, so its
+    weight is added once, not multiplied. They come out of Affect Mods,
+    which is why parsing that field mattered — an item granting sanctuary
+    at weight 50 outscores a pile of +str, which is exactly dinv's intent.
+
+    RESIST ROLLUPS: a priority that weights all_phys credits each of the
+    three physical resists at a third of it, and all_magic each of the
+    seventeen magical ones at a seventeenth. Naming a resist explicitly
+    wins over the rollup — specificity beats the general case.
+]]
+local PHYS_RES = { "bash", "pierce", "slash" }
+local MAG_RES = { "acid", "air", "cold", "disease", "earth", "electric",
+    "energy", "fire", "holy", "light", "magic", "mental", "negative",
+    "poison", "shadow", "sonic", "water" }
 
 local function score_of(serial)
     local r = ids.stats[serial]
@@ -1034,9 +1314,30 @@ local function score_of(serial)
     local total = 0
     for stat, weight in pairs(ws) do
         local v = tonumber(r[stat])
-        if v ~= nil then total = total + v * weight end
+        if v ~= nil then
+            total = total + v * weight
+        elseif r["aff_" .. stat] == 1 then
+            total = total + weight
+        end
     end
-    return total
+
+    local wp = tonumber(ws.all_phys)
+    if wp ~= nil and wp > 0 then
+        for _, k in ipairs(PHYS_RES) do
+            local v = tonumber(r[k])
+            if v ~= nil and ws[k] == nil then total = total + wp * v / 3 end
+        end
+    end
+    local wm = tonumber(ws.all_magic)
+    if wm ~= nil and wm > 0 then
+        for _, k in ipairs(MAG_RES) do
+            local v = tonumber(r[k])
+            if v ~= nil and ws[k] == nil then total = total + wm * v / 17 end
+        end
+    end
+
+    -- two decimals, once, at the end — dinv rounds the same way
+    return tonumber(string.format("%.2f", total))
 end
 
 -- the box says "Wearable : finger"; anything unlisted gets its own slot
@@ -1046,7 +1347,7 @@ local function slot_of(serial)
     local wearable = string.lower(trim(tostring(r.wearable or "")))
     if wearable == "" then return "" end
     -- first word: "wield (weapon)" and friends carry trailing commentary
-    local p = pfind(wearable, " ", 1, true)
+    local p = pfind(wearable, " ")
     if p ~= nil then wearable = string.sub(wearable, 1, p - 1) end
     return wearable
 end
@@ -1260,11 +1561,11 @@ local CSS_HEAD = [==[
 local function match_filter(it)
     if filter == "" then return true end
     local q = string.lower(filter)
-    if pfind(string.lower(it.name), q, 1, true) ~= nil then return true end
+    if pfind(string.lower(it.name), q) ~= nil then return true end
     local tn = TYPE_NAME[it.itype]
     if type(tn) == "string"
-        and pfind(string.lower(tn), q, 1, true) ~= nil then return true end
-    if pfind(it.serial, q, 1, true) ~= nil then return true end
+        and pfind(string.lower(tn), q) ~= nil then return true end
+    if pfind(it.serial, q) ~= nil then return true end
     return false
 end
 
@@ -1339,7 +1640,7 @@ local function count_where(prefix)
     for _, it in pairs(db.items) do
         if type(it) == "table" then
             if it.where == prefix
-                or (pfind(it.where, prefix, 1, true) == 1 and prefix == "c:") then
+                or (pfind(it.where, prefix) == 1 and prefix == "c:") then
                 n = n + 1
             end
         end
@@ -1524,11 +1825,26 @@ local MENU = {
     { g = "View",     l = "use",          c = "use",          t = "consumables and portals" },
     { g = "View",     l = "clear filter", c = "search",       t = "drop the current filter" },
 
-    { g = "Gear",     l = "profiles",     c = "prio",         t = "list scoring profiles and their weights" },
-    { g = "Gear",     l = "damage",       c = "prio use damage",   t = "score for damage" },
-    { g = "Gear",     l = "caster",       c = "prio use caster",   t = "score for casting" },
-    { g = "Gear",     l = "tank",         c = "prio use tank",     t = "score for survivability" },
-    { g = "Gear",     l = "balanced",     c = "prio use balanced", t = "score everything evenly" },
+    { g = "Gear",     l = "profiles",     c = "prio",              t = "list scoring profiles and their weights" },
+    { g = "Gear",     l = "psi",          c = "prio use psi",       t = "Aardwolf's psionicist weighting" },
+    { g = "Gear",     l = "mage",         c = "prio use mage",      t = "Aardwolf's mage weighting" },
+    { g = "Gear",     l = "cleric",       c = "prio use cleric",    t = "Aardwolf's cleric weighting" },
+    { g = "Gear",     l = "warrior",      c = "prio use warrior",   t = "Aardwolf's warrior weighting" },
+    { g = "Gear",     l = "thief",        c = "prio use thief",     t = "Aardwolf's thief weighting" },
+    { g = "Gear",     l = "ranger",       c = "prio use ranger",    t = "Aardwolf's ranger weighting" },
+    { g = "Gear",     l = "paladin",      c = "prio use paladin",   t = "Aardwolf's paladin weighting" },
+    { g = "Gear",     l = "melee",        c = "prio use melee",     t = "damage plus heavy weight on sanctuary/haste" },
+    { g = "Gear",     l = "defense",      c = "prio use defense",   t = "constitution, hp and resistances" },
+
+    { g = "Find",     l = "worn",         c = "find worn",         t = "everything you are wearing" },
+    { g = "Find",     l = "carried",      c = "find carried",      t = "everything not worn" },
+    { g = "Find",     l = "containers",   c = "find type container", t = "your bags" },
+    { g = "Find",     l = "potions",      c = "find type potion",  t = "every potion indexed" },
+    { g = "Find",     l = "keys",         c = "find type key",     t = "every key indexed" },
+    { g = "Find",     l = "portals",      c = "find type portal",  t = "every portal indexed" },
+
+    { g = "Kit",      l = "regen auto",   c = "regen auto",   t = "find a regeneration ring and use it on sleep" },
+    { g = "Kit",      l = "regen off",    c = "regen off",    t = "stop swapping a ring in on sleep" },
 
     { g = "Data",     l = "backup",       c = "backup",       t = "save the item and identify stores" },
     { g = "Data",     l = "restore",      c = "restore",      t = "load the last backup" },
@@ -1568,7 +1884,7 @@ local function render_use()
         local found = {}
         for _, it in pairs(db.items) do
             if type(it) == "table" and types[it.itype] == true
-                and (it.where == "inv" or pfind(it.where, "c:", 1, true) == 1)
+                and (it.where == "inv" or pfind(it.where, "c:") == 1)
                 and match_filter(it) then
                 table.insert(found, it)
             end
@@ -1620,7 +1936,7 @@ render = function()
             .. "rescan. <b>serials</b> shows each item's object id, the number "
             .. "Aardwolf's data commands key on. Vault data needs a vault in the "
             .. "room; <code>/awinv vault</code> asks for it.</div>"
-    elseif pfind(view, "item:", 1, true) == 1 then
+    elseif pfind(view, "item:") == 1 then
         body = render_item(string.sub(view, 6))
     elseif view == "best" then
         body = render_best()
@@ -1714,9 +2030,9 @@ end
 -- the Aardwolf prompt, by plain text — hp, mn and mv together are
 -- structural and no data row carries all three (EQ Search's test)
 local function is_prompt(line)
-    return pfind(line, "hp ", 1, true) ~= nil
-       and pfind(line, "mn ", 1, true) ~= nil
-       and pfind(line, "mv ", 1, true) ~= nil
+    return pfind(line, "hp ") ~= nil
+       and pfind(line, "mn ") ~= nil
+       and pfind(line, "mv ") ~= nil
 end
 
 -- forward-declared: scan_end schedules the next scan
@@ -1912,7 +2228,7 @@ local function on_invmon(c, line, w)
     if qol.watchWear == true then
         local plain = tostring(line or "")
         local payload = ""
-        local p = pfind(plain, "}", 1, true)
+        local p = pfind(plain, "}")
         if p ~= nil then payload = string.sub(plain, p + 1) end
         local f = csv_fields(trim(payload))
         if #f >= 2 and trim(f[1]) == "1" and trim(f[2]) ~= "" then
@@ -2235,6 +2551,113 @@ function init()
             utilprint(TAG .. "rescanning eq, inventory, containers and keyring...")
             showWidget(widget)
 
+        elseif string.sub(low, 1, 5) == "find " or low == "find" then
+            -- the query language against the index, printed, not filtered
+            local q = trim(string.sub(a, 5))
+            local hits = q_find(q)
+            utilprint(TAG .. #hits .. " match(es) for '" .. q .. "':")
+            local i = 1
+            while i <= #hits and i <= 40 do
+                local it = db.items[hits[i]]
+                local sc = score_of(hits[i])
+                utilprint("$w  " .. hits[i] .. "  $C" .. it.name
+                    .. "$w  L" .. it.level .. " " .. it.where
+                    .. (sc ~= nil and sc > 0 and ("  " .. sc .. "pt") or ""))
+                i = i + 1
+            end
+            if #hits > 40 then utilprint("$K  ...and " .. (#hits - 40) .. " more.$w") end
+
+        elseif string.sub(low, 1, 4) == "get " then
+            -- pull every match into main inventory, wherever it sits
+            local hits = q_find(trim(string.sub(a, 4)))
+            local n = 0
+            for _, serial in ipairs(hits) do
+                local it = db.items[serial]
+                if it.where == "eq" then
+                    send("remove " .. serial); n = n + 1
+                elseif pfind(it.where, "c:") == 1 then
+                    send("get " .. serial .. " " .. string.sub(it.where, 3)); n = n + 1
+                end
+            end
+            utilprint(TAG .. n .. " item(s) moved to inventory.")
+            if n > 0 then addTimer(900, function() refresh(false) end) end
+
+        elseif string.sub(low, 1, 4) == "put " then
+            --[[
+                put <container serial> <query> — the container first, as
+                dinv has it, so the query keeps the rest of the line.
+            ]]
+            local rest = trim(string.sub(a, 4))
+            local sp = pfind(rest, " ")
+            local con = (sp ~= nil) and string.sub(rest, 1, sp - 1) or rest
+            local q = (sp ~= nil) and trim(string.sub(rest, sp + 1)) or ""
+            if type(db.items[con]) ~= "table" or q == "" then
+                utilprint(TAGR .. "usage: /awinv put <container serial> <query>")
+            else
+                local n = 0
+                for _, serial in ipairs(q_find(q)) do
+                    if serial ~= con and db.items[serial].where ~= "c:" .. con then
+                        if db.items[serial].where == "eq" then send("remove " .. serial) end
+                        send("put " .. serial .. " " .. con)
+                        n = n + 1
+                    end
+                end
+                utilprint(TAG .. n .. " item(s) into " .. db.items[con].name .. ".")
+                if n > 0 then addTimer(900, function() refresh(false) end) end
+            end
+
+        elseif string.sub(low, 1, 8) == "keyword " then
+            --[[
+                Player-invented keywords, stored beside the identify record
+                so they survive the item leaving and coming back. Queryable
+                as 'kw <word>'.
+            ]]
+            local rest = trim(string.sub(a, 8))
+            local op = ""
+            if string.sub(string.lower(rest), 1, 4) == "add " then
+                op = "add"; rest = trim(string.sub(rest, 4))
+            elseif string.sub(string.lower(rest), 1, 3) == "rm " then
+                op = "rm"; rest = trim(string.sub(rest, 3))
+            end
+            local sp = pfind(rest, " ")
+            local word = (sp ~= nil) and string.lower(string.sub(rest, 1, sp - 1)) or ""
+            local q = (sp ~= nil) and trim(string.sub(rest, sp + 1)) or ""
+
+            if op == "" or word == "" or q == "" then
+                utilprint(TAGR .. "usage: /awinv keyword add|rm <word> <query>")
+            else
+                local n = 0
+                for _, serial in ipairs(q_find(q)) do
+                    if type(ids.stats[serial]) ~= "table" then ids.stats[serial] = {} end
+                    local cur = tostring(ids.stats[serial].tags or "")
+                    local has = pfind(" " .. cur .. " ", " " .. word .. " ") ~= nil
+                    if op == "add" and not has then
+                        ids.stats[serial].tags = trim(cur .. " " .. word)
+                        n = n + 1
+                    elseif op == "rm" and has then
+                        local outw = {}
+                        for wd in string.gmatch(cur, "%S+") do
+                            if wd ~= word then table.insert(outw, wd) end
+                        end
+                        ids.stats[serial].tags = table.concat(outw, " ")
+                        n = n + 1
+                    end
+                end
+                save_stats()
+                render()
+                utilprint(TAG .. "'" .. word .. "' " .. op .. " on " .. n .. " item(s). "
+                    .. "Query them with: kw " .. word)
+            end
+
+        elseif string.sub(low, 1, 7) == "forget " then
+            -- drop what we know so the next id re-reads it
+            local hits = q_find(trim(string.sub(a, 7)))
+            for _, serial in ipairs(hits) do ids.stats[serial] = nil end
+            save_stats()
+            render()
+            utilprint(TAG .. "forgot the stats of " .. #hits
+                .. " item(s); 'id missing' re-reads them.")
+
         elseif string.sub(low, 1, 3) == "do " then
             --[[
                 Send a MUD command verbatim and rescan after it. The panel's
@@ -2365,11 +2788,11 @@ function init()
 
             elseif string.sub(restLow, 1, 4) == "set " then
                 -- prio set <name> <stat> <weight>; a new name makes a profile
-                local p1 = pfind(restLow, " ", 1, true)
+                local p1 = pfind(restLow, " ")
                 local tail = trim(string.sub(restLow, p1 + 1))
-                local p2 = pfind(tail, " ", 1, true)
+                local p2 = pfind(tail, " ")
                 local rest2 = (p2 ~= nil) and trim(string.sub(tail, p2 + 1)) or ""
-                local p3 = pfind(rest2, " ", 1, true)
+                local p3 = pfind(rest2, " ")
                 if p2 == nil or p3 == nil then
                     utilprint(TAG .. "usage: /awinv prio set <name> <stat> <weight>")
                 else
@@ -2426,19 +2849,113 @@ function init()
             end
 
         elseif string.sub(low, 1, 3) == "go " then
-            local serial = trim(string.sub(low, 3))
+            --[[
+                dinv's portal mode: remember what the hold slot had, take
+                the portal out, hold, enter — then put things back a beat
+                LATER rather than in the same burst. dinv splits it for a
+                real reason: portal landings get camped, and swapping back
+                must not block you running out of the room.
+            ]]
+            local q = trim(string.sub(a, 3))
+            local serial = q
+            if tonumber(q) == nil then
+                local hits = q_find(q .. " type portal")
+                if #hits == 0 then hits = q_find(q) end
+                serial = (hits[1] ~= nil) and hits[1] or ""
+            end
+
             local it = db.items[serial]
             if type(it) ~= "table" then
-                utilprint(TAGR .. "serial " .. serial .. " isn't in the index.")
+                utilprint(TAGR .. "no portal matching '" .. q .. "' in the index.")
             else
+                local held = ""
+                for s2, i2 in pairs(db.items) do
+                    if type(i2) == "table" and i2.where == "eq" and i2.itype ~= 11
+                        and slot_of(s2) == "hold" then
+                        held = s2
+                    end
+                end
+                local home = ""
+                if pfind(it.where, "c:") == 1 then home = string.sub(it.where, 3) end
+
+                if held ~= "" then send("remove " .. held) end
+                if home ~= "" then send("get " .. serial .. " " .. home) end
                 send("hold " .. serial)
                 send("enter")
                 utilprint(TAG .. "entering " .. it.name .. "...")
+
+                addTimer(1200, function()
+                    if home ~= "" then send("put " .. serial .. " " .. home) end
+                    if held ~= "" then send("wear " .. held) end
+                    addTimer(600, function() refresh(false) end)
+                end)
+            end
+
+        elseif string.sub(low, 1, 5) == "pass " then
+            --[[
+                dinv's pass: an area wants a non-key item in your hands for
+                a moment. Take it out, hold it there, put it back. Meant to
+                be fired from a mapper custom exit.
+            ]]
+            local rest = trim(string.sub(a, 5))
+            local sp = pfind(rest, " ")
+            local who = (sp ~= nil) and string.sub(rest, 1, sp - 1) or rest
+            local secs = (sp ~= nil) and tonumber(trim(string.sub(rest, sp + 1))) or 10
+            if secs == nil or secs < 1 then secs = 10 end
+
+            local serial = who
+            if tonumber(who) == nil then
+                local hits = q_find(who)
+                serial = (hits[1] ~= nil) and hits[1] or ""
+            end
+            local it = db.items[serial]
+            if type(it) ~= "table" then
+                utilprint(TAGR .. "no item matching '" .. who .. "' in the index.")
+            else
+                local home = ""
+                if pfind(it.where, "c:") == 1 then home = string.sub(it.where, 3) end
+                if home ~= "" then send("get " .. serial .. " " .. home) end
+                utilprint(TAG .. it.name .. " in hand for " .. secs .. "s.")
+                addTimer(secs * 1000, function()
+                    if home ~= "" then
+                        send("put " .. serial .. " " .. home)
+                    end
+                end)
             end
 
         elseif string.sub(low, 1, 5) == "regen" then
             local what = trim(string.sub(low, 6))
-            if what == "off" then
+            if what == "auto" or (what == "" and qol.regen == "") then
+                --[[
+                    dinv never asked which ring: it searched the identify
+                    data for an item whose Affect Mods carry regeneration
+                    and that you are high enough to wear. Now that we parse
+                    Affect Mods, so can we.
+                ]]
+                local lvl = char_level()
+                local pick, pickLvl = "", -1
+                for serial, r in pairs(ids.stats) do
+                    if type(r) == "table" and r.aff_regeneration == 1 then
+                        local it = db.items[serial]
+                        local rl = tonumber(r.level)
+                        if rl == nil then rl = 0 end
+                        if type(it) == "table" and rl <= lvl and rl > pickLvl then
+                            pick, pickLvl = serial, rl
+                        end
+                    end
+                end
+                if pick == "" then
+                    utilprint(TAGR .. "no identified item with a regeneration "
+                        .. "affect found - run '/awinv build' first, or set one "
+                        .. "by hand: /awinv regen <serial>")
+                else
+                    qol.regen = pick
+                    save_qol()
+                    utilprint(TAG .. "regen ring: " .. db.items[pick].name
+                        .. " (" .. pick .. ", level " .. pickLvl
+                        .. ") - worn when you sleep.")
+                end
+            elseif what == "off" then
                 qol.regen = ""
                 qol.regenPrev = ""
                 qol.watchWear = false
@@ -2502,6 +3019,12 @@ function init()
             utilprint("$w  /awinv build               dinv's build: rescan, then id everything")
             utilprint("$w  /awinv vault               rescan with the vault too")
             utilprint("$w  /awinv search <text>       filter the panel")
+            utilprint("$w  /awinv find <query>        query language: 'type weapon minlevel 100'")
+            utilprint("$w  /awinv get <query>         bring matches to your inventory")
+            utilprint("$w  /awinv put <bag> <query>   stow matches in a container")
+            utilprint("$w  /awinv keyword add|rm <word> <query>   your own tags, query with 'kw <word>'")
+            utilprint("$w  /awinv forget <query>      drop stored stats so they re-identify")
+            utilprint("$w  /awinv pass <item> <secs>  hold an area pass briefly")
             utilprint("$w  /awinv id <serial|missing|all|stop>   identify into the database")
             utilprint("$w  /awinv best                best identified item per slot")
             utilprint("$w  /awinv use [serial]        consumables/portals view, or use one")
