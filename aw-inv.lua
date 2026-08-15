@@ -77,7 +77,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "2.2.0",
+    version     = "2.2.1",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -160,6 +160,8 @@ local st = {
     nSent = 0, nOpen = 0, nClose = 0, nRow = 0, nParsed = 0,
     rej = "",            -- why the last row was rejected, for /awinv debug
     buildAfter = false,  -- /awinv build: identify everything once scans finish
+    scanRows = 0,        -- rows this scan has produced; gates the prompt-close
+    scanSeq = 0,         -- scan token, so a grace timer can't close a later scan
 }
 
 local widget  = nil
@@ -1337,10 +1339,18 @@ local function count_where(prefix)
     return n
 end
 
+--[[
+    Every container we know of, wherever it sits: carried, worn (a pack on
+    the back is type 11 in the eq list) or nested inside another bag. A
+    list that only looked at "inv" missed worn packs entirely and never
+    recursed, so their contents stayed invisible.
+]]
 local function container_list()
     local out = {}
     for _, it in pairs(db.items) do
-        if type(it) == "table" and it.itype == 11 and it.where == "inv" then
+        if type(it) == "table" and it.itype == 11
+            and (it.where == "inv" or it.where == "eq"
+                 or pfind(it.where, "c:") == 1) then
             table.insert(out, it)
         end
     end
@@ -1622,13 +1632,29 @@ local next_scan = nil
 local function scan_end()
     if st.inBlock == "" then return end
     local wasInv = (st.inBlock == "inv")
+    local wasCon = (pfind(st.inBlock, "c:") == 1)
     block_release()
 
-    if wasInv then
+    --[[
+        Queue a scan for every container we now know about and haven't
+        already queued or scanned. Runs after the inventory scan AND after
+        each container scan, so a bag inside a bag is picked up when its
+        parent's contents land. db.items is the dedupe: a container whose
+        contents are already filed is not re-queued.
+    ]]
+    if wasInv or wasCon then
+        local queued = {}
+        for _, q in ipairs(st.scanQ) do queued[q.where] = true end
+
         for _, con in ipairs(container_list()) do
-            table.insert(st.scanQ, {
-                cmd = "invdata " .. con.serial, where = "c:" .. con.serial,
-            })
+            local key = "c:" .. con.serial
+            local known = false
+            for _, it in pairs(db.items) do
+                if type(it) == "table" and it.where == key then known = true end
+            end
+            if queued[key] ~= true and not known then
+                table.insert(st.scanQ, { cmd = "invdata " .. con.serial, where = key })
+            end
         end
     end
 
@@ -1640,12 +1666,21 @@ local function scan_end()
         scans found through the identify queue. The refresh knew the items;
         the ids know their stats.
     ]]
-    if #st.scanQ == 0 and st.buildAfter == true then
-        st.buildAfter = false
-        local added = id_queue("missing")
-        utilprint(TAG .. "scan done - identifying " .. added
-            .. " unidentified item(s), one at a time...")
-        id_next()
+    if #st.scanQ == 0 then
+        local nCon = #container_list()
+        local nAll = 0
+        for _, _x in pairs(db.items) do nAll = nAll + 1 end
+        utilprint(TAG .. "scan complete: " .. nAll .. " item(s), "
+            .. count_where("eq") .. " worn, " .. count_where("inv")
+            .. " carried, " .. nCon .. " container(s).")
+
+        if st.buildAfter == true then
+            st.buildAfter = false
+            local added = id_queue("missing")
+            utilprint(TAG .. "identifying " .. added .. " item(s) - gear is "
+                .. "removed and re-worn as it goes. 'id stop' halts it.")
+            id_next()
+        end
     end
 
     addTimer(250, function()
@@ -1659,14 +1694,31 @@ next_scan = function()
 
     local s = table.remove(st.scanQ, 1)
     clear_where(s.where)
-    st.inBlock = s.where
-    st.mine    = true
-    st.buf     = {}
+    st.inBlock  = s.where
+    st.mine     = true
+    st.buf      = {}
+    st.scanRows = 0
+    st.scanSeq  = st.scanSeq + 1
+    local mySeq = st.scanSeq
     if s.where == "key" then db.haveKey = true end
     if s.where == "vault" then db.haveVault = true end
 
     st.nSent = st.nSent + 1
     send(s.cmd)
+
+    --[[
+        The prompt only closes a scan that has produced rows — this MUD's
+        prompts arrive in pairs, and a stray one landing between the send
+        and the data was ending scans empty (which is how the inventory
+        read 0 carried and no bag ever chained a scan). A genuinely empty
+        result closes on this grace timer instead; the long timer stays
+        as the catch-all.
+    ]]
+    addTimer(2500, function()
+        if st.scanSeq == mySeq and st.inBlock ~= "" and st.scanRows == 0 then
+            scan_end()
+        end
+    end)
 
     if st.blockTimer ~= nil then pcall(removeTimer, st.blockTimer) end
     st.blockTimer = addTimer(BLOCK_MS, function()
@@ -1692,7 +1744,7 @@ local function on_row(c, line, w, raw)
     if plain == "" then return end
 
     if is_prompt(plain) then
-        scan_end()
+        if st.scanRows > 0 then scan_end() end
         return
     end
 
@@ -1707,6 +1759,7 @@ local function on_row(c, line, w, raw)
 
     st.nRow = st.nRow + 1
     local okp = parse_row(plain, st.inBlock)
+    if okp == true then st.scanRows = st.scanRows + 1 end
 
     -- scans run inside live output and chatter interleaves; only a line
     -- that really was a data row is ours to hide
