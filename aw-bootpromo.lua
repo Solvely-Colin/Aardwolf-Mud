@@ -27,7 +27,7 @@
 plugin = {
     id          = "aw-bootpromo",
     name        = "Boot Promotion Tracker",
-    version     = "2.0.6",
+    version     = "2.1.0",
     author      = "Catdad",
     description = "Boot Lyceum promotion progress - days in clan, QP, campaigns and goals against each tier's bar.",
     settings    = { saveState = true },
@@ -59,6 +59,16 @@ local cfg = {
     fpx = 0,   -- suite font px from Core's "aw-font" broadcast
     fov = 0,   -- this panel's own font px; 0 = follow the suite
 }
+
+-- trigger ids, so cleanup can release them; a stranded trigger keeps
+-- firing into a dead plugin and a re-enable registers a second copy
+local trigs = {}
+
+local function trig(pattern, fn, opts)
+    local id = addTrigger(pattern, fn, opts)
+    table.insert(trigs, id)
+    return id
+end
 
 local widget    = nil
 local view      = "bars"    -- "bars" | "settings"
@@ -105,7 +115,14 @@ end
 -- a GMCP field by name; pairs can see keys dot access cannot reach
 local function gfield(t, name)
     if type(t) ~= "table" then return nil end
-    if t[name] ~= nil then return t[name] end
+    -- type-tested, not `~= nil`: a key dot access cannot reach reads as
+    -- undefined, and undefined ~= nil is TRUE here, which made the pairs
+    -- walk below dead code and every GMCP read return nothing usable
+    local direct = t[name]
+    if type(direct) == "string" or type(direct) == "number"
+        or type(direct) == "boolean" or type(direct) == "table" then
+        return direct
+    end
     for k, v in pairs(t) do
         if tostring(k) == name then return v end
     end
@@ -457,31 +474,31 @@ function init()
     onGMCPUpdate("char.worth", poll_qp)
 
     -- whois: the header line says whose whois it is; the stat lines follow
-    addTrigger("^\\[\\s*\\d+\\s+T\\d+.*?\\]\\s+(\\w+)", on_whois_header,
+    trig("^\\[\\s*\\d+\\s+T\\d+.*?\\]\\s+(\\w+)", on_whois_header,
         { type = "regex", keepEvaluating = true })
-    addTrigger("^Qp Earned\\s*:\\s*\\[\\s*(\\d+)\\s*\\]", function(c, line, w)
+    trig("^Qp Earned\\s*:\\s*\\[\\s*(\\d+)\\s*\\]", function(c, line, w)
         whois_capture(c, w, "qp", "QP earned")
     end, { type = "regex", keepEvaluating = true })
-    addTrigger("Campaigns Done\\s*:\\s*\\[\\s*(\\d+)\\s*\\]", function(c, line, w)
+    trig("Campaigns Done\\s*:\\s*\\[\\s*(\\d+)\\s*\\]", function(c, line, w)
         whois_capture(c, w, "cp", "Campaigns")
     end, { type = "regex", keepEvaluating = true })
-    addTrigger("Gquests Won\\s*:\\s*\\[\\s*(\\d+)\\s*\\]", function(c, line, w)
+    trig("Gquests Won\\s*:\\s*\\[\\s*(\\d+)\\s*\\]", function(c, line, w)
         whois_capture(c, w, "gq", "GQuest wins")
     end, { type = "regex", keepEvaluating = true })
-    addTrigger("Quests Complete\\s*:\\s*\\[\\s*(\\d+)\\s*\\]", function(c, line, w)
+    trig("Quests Complete\\s*:\\s*\\[\\s*(\\d+)\\s*\\]", function(c, line, w)
         whois_capture(c, w, "quests", "Quests")
     end, { type = "regex", keepEvaluating = true })
 
     -- goals sync straight off 'score'; no self-check needed, score is yours
-    addTrigger("Goals done\\s*:\\s*\\[\\s*(\\d+)\\s*\\]", function(c, line, w)
+    trig("Goals done\\s*:\\s*\\[\\s*(\\d+)\\s*\\]", function(c, line, w)
         set_counter("goals", tonumber(cap(c, w, 1)), "Goals")
     end, { type = "regex", keepEvaluating = true })
 
-    addTrigger("As a reward, I am giving you (\\d+) quest points", on_quest_done,
+    trig("As a reward, I am giving you (\\d+) quest points", on_quest_done,
         { type = "regex", keepEvaluating = true })
-    addTrigger("You have completed your campaign", on_cp_done,
+    trig("You have completed your campaign", on_cp_done,
         { type = "regex", keepEvaluating = true })
-    addTrigger("Global Quest.*has been won by (\\w+)", on_gq_won,
+    trig("Global Quest.*has been won by (\\w+)", on_gq_won,
         { type = "regex", keepEvaluating = true })
 
     drop_handlers(widget, "action")
@@ -631,4 +648,14 @@ function init()
             show_help()
         end
     end, "Boot Lyceum promotion tracker - progress, sync and request drafting")
+end
+
+--[[
+    Release what init registered. The client tidies widgets, but triggers
+    outlive a disabled plugin and would double up on re-enable.
+]]
+function cleanup()
+    for _, id in ipairs(trigs) do pcall(removeTrigger, id) end
+    trigs = {}
+    pcall(drop_handlers, widget, "action")
 end

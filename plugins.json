@@ -23,14 +23,14 @@
     {
       "id": "aw-bootpromo",
       "name": "Boot Promotion Tracker",
-      "version": "2.0.6",
+      "version": "2.1.0",
       "author": "Catdad",
       "description": "Boot Lyceum promotion progress - days in clan, QP, campaigns and goals against each tier's bar.",
       "category": "widgets",
-      "downloadUrl": "https://raw.githubusercontent.com/Solvely-Colin/Aardwolf-Mud/main/dist/aw-bootpromo-2.0.6.json",
+      "downloadUrl": "https://raw.githubusercontent.com/Solvely-Colin/Aardwolf-Mud/main/dist/aw-bootpromo-2.1.0.json",
       "format": "json",
-      "sha256": "85c6361fa9ef5fa0eed27e00ea968006188aa7d47aa3650f4019cf9f23199236",
-      "size": 24507,
+      "sha256": "15f1de71d767fc2d56c3d3165d5f24fee89e861024dfb23ada735f7a4247aeef",
+      "size": 25426,
       "license": "MIT",
       "homepage": "https://github.com/Solvely-Colin/Aardwolf-Mud"
     }
