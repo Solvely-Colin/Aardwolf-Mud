@@ -77,7 +77,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "2.4.0",
+    version     = "2.4.1",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -808,7 +808,23 @@ local function load_prof()
         end
     end
 
-    if type(prof.sets[prof.active]) ~= "table" then prof.active = "damage" end
+    --[[
+        The saved active profile may name one this version no longer ships
+        — 2.4.0 replaced the invented damage/caster/tank set with dinv's
+        class weights. An active profile that resolves to nothing makes
+        score_of return nil for every item, which empties the best tab and
+        every score in the list with no error to explain it. Fall back to
+        a profile that exists, preferring psi, then whatever is there.
+    ]]
+    if type(prof.sets[prof.active]) ~= "table" then
+        if type(prof.sets.psi) == "table" then
+            prof.active = "psi"
+        else
+            for name, ws in pairs(prof.sets) do
+                if type(ws) == "table" then prof.active = name end
+            end
+        end
+    end
 end
 
 local function save_qol()
@@ -1781,8 +1797,34 @@ local function render_best()
         .. level .. ", profile " .. esc(prof.active) .. "</div>")
 
     if #rows == 0 then
-        table.insert(out, '<div class="empty">Nothing scored yet &#8212; identify '
-            .. "your gear: <code>/awinv id missing</code>.</div>")
+        --[[
+            Say WHICH stage is empty. "nothing scored" reads as a bug when
+            the truth is usually one of three ordinary things: nothing
+            indexed, nothing identified, or identified gear whose stats
+            this profile happens not to weight.
+        ]]
+        local nId = 0
+        for _, r in pairs(ids.stats) do
+            if type(r) == "table" then nId = nId + 1 end
+        end
+        local nSlot = 0
+        for s2, r2 in pairs(ids.stats) do
+            if type(r2) == "table" and slot_of(s2) ~= "" then nSlot = nSlot + 1 end
+        end
+
+        local why = ""
+        if nId == 0 then
+            why = "nothing identified yet &#8212; <code>/awinv build</code>."
+        elseif nSlot == 0 then
+            why = nId .. " item(s) identified, but none of them report a "
+                .. "wearable slot, so there is nothing to rank per location."
+        else
+            why = nSlot .. " wearable item(s) identified, but none score above "
+                .. "zero under <b>" .. esc(prof.active) .. "</b>. Try another "
+                .. "profile from the menu, or <code>/awinv prio</code> to see "
+                .. "what it weights."
+        end
+        table.insert(out, '<div class="empty">' .. why .. "</div>")
     end
 
     for _, e in ipairs(rows) do
