@@ -27,7 +27,7 @@
 plugin = {
     id          = "aw-bootpromo",
     name        = "Boot Promotion Tracker",
-    version     = "2.0.5",
+    version     = "2.0.6",
     author      = "Catdad",
     description = "Boot Lyceum promotion progress - days in clan, QP, campaigns and goals against each tier's bar.",
     settings    = { saveState = true },
@@ -561,11 +561,19 @@ function init()
 
         elseif string.sub(low, 1, 4) == "set " then
             local rest = trim(string.sub(low, 4))
-            -- string.find returns 0-based positions on this runtime
-            -- (measured in aw-inv); correct by probing where "y" sits in "xy"
-            local fadj = (string.find("xy", "y", 1, true) == 1) and 1 or 0
+            --[[
+                string.find's (start, end) pair arrives as ONE array when
+                assigned to a single local on this runtime (measured in
+                aw-inv) - extract the start element before using it.
+            ]]
             local p = string.find(rest, " ", 1, true)
-            if p ~= nil then p = p + fadj end
+            if p ~= nil and type(p) ~= "number" then
+                local v = p[0]
+                if v == nil then v = p["0"] end
+                if v == nil then v = p[1] end
+                if v == nil then v = p["1"] end
+                p = tonumber(v)
+            end
             local key = (p ~= nil) and string.sub(rest, 1, p - 1) or ""
             local n = (p ~= nil) and tonumber(trim(string.sub(rest, p + 1))) or nil
             if n ~= nil and (key == "qp" or key == "cp" or key == "gq"

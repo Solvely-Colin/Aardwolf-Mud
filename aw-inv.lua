@@ -77,7 +77,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "2.1.4",
+    version     = "2.1.5",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -308,11 +308,33 @@ end
     lands on the comma it just found, forever.) pfind asks once where
     "y" sits in "xy" and corrects every position-consuming find.
 ]]
+--[[
+    Measured live, the real find defect at last: string.find returns its
+    Lua pair (start, end) COLLECTED INTO ONE ARRAY when assigned to a
+    single local — MUDFORGE-NOTES 13b's destructuring trap, in the stdlib.
+    The probe printed "2,20": the array [2,2], then "+ 0" concatenated.
+    Every arithmetic on such a value is NaN and every slice built from it
+    is empty, which is the whole parser saga in one line. No shipping
+    plugin ever hit it because none consumes find's position — they use
+    it as a boolean. rawfind_first digs out the start element whatever
+    the key shape, and the base probe runs on the extracted number.
+]]
+local function rawfind_first(s, needle)
+    local q = string.find(s, needle, 1, true)
+    if q == nil then return nil end
+    if type(q) == "number" then return q end
+    local v = q[0]
+    if v == nil then v = q["0"] end
+    if v == nil then v = q[1] end
+    if v == nil then v = q["1"] end
+    return tonumber(v)
+end
+
 local FIND_ADJ = 0
-if string.find("xy", "y", 1, true) == 1 then FIND_ADJ = 1 end
+if rawfind_first("xy", "y") == 1 then FIND_ADJ = 1 end
 
 local function pfind(s, needle)
-    local q = string.find(s, needle, 1, true)
+    local q = rawfind_first(s, needle)
     if q == nil then return nil end
     return q + FIND_ADJ
 end
