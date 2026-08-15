@@ -77,7 +77,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "2.1.0",
+    version     = "2.1.1",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -158,6 +158,7 @@ local st = {
     clockMs    = 0,      -- counter of debounce windows, bumped per invmon burst
     -- lifetime counters, so /awinv debug can say which stage went quiet
     nSent = 0, nOpen = 0, nClose = 0, nRow = 0, nParsed = 0,
+    rej = "",            -- why the last row was rejected, for /awinv debug
     buildAfter = false,  -- /awinv build: identify everything once scans finish
 }
 
@@ -402,36 +403,77 @@ end
     One CSV row into the table. Two fields off the front, five off the back;
     commas inside the name survive because the name is whatever is left.
 ]]
+--[[
+    Row parse by pure string walking — scalars only. The first version
+    split into a table and read it back positionally, and every one of 186
+    live rows bounced while the counters proved the lines themselves were
+    arriving. Rather than divine which table semantic this runtime breaks,
+    there are none left: two fields off the front by find/sub, the last
+    five comma positions carried in five scalars, the name is what remains
+    between. Slicing walk per MUDFORGE-NOTES 11; rej remembers why the
+    last rejection happened for /awinv debug.
+]]
 local function parse_row(line, where)
-    local f = csv_fields(trim(line))
-    local n = #f
-    if n < 8 then return false end
+    local s = trim(line)
 
-    -- scans read the open stream, so the shape test carries the weight:
-    -- a long all-digit serial up front, numeric fields behind the name
-    local serial = trim(f[1])
-    if serial == "" or #serial < 6 or tonumber(serial) == nil then return false end
+    local p1 = string.find(s, ",", 1, true)
+    if p1 == nil or p1 < 7 then
+        st.rej = "no-serial: " .. string.sub(s, 1, 60)
+        return false
+    end
+    local serial = string.sub(s, 1, p1 - 1)
+    if tonumber(serial) == nil then
+        st.rej = "serial-nan: " .. string.sub(s, 1, 60)
+        return false
+    end
 
-    local name = f[3]
-    local i = 4
-    while i <= n - 5 do
-        name = name .. "," .. f[i]
-        i = i + 1
+    local rest = string.sub(s, p1 + 1)
+    local p2 = string.find(rest, ",", 1, true)
+    if p2 == nil then
+        st.rej = "no-flags: " .. string.sub(s, 1, 60)
+        return false
+    end
+    local flags = string.sub(rest, 1, p2 - 1)
+    rest = string.sub(rest, p2 + 1)      -- name,level,type,unique,wear,timer
+
+    -- the last five comma positions, oldest first, in five scalars
+    local c1, c2, c3, c4, c5 = 0, 0, 0, 0, 0
+    local off = 0
+    local guard = 0
+    while guard < 300 do
+        guard = guard + 1
+        local q = string.find(string.sub(rest, off + 1), ",", 1, true)
+        if q == nil then break end
+        off = off + q
+        c1 = c2
+        c2 = c3
+        c3 = c4
+        c4 = c5
+        c5 = off
+    end
+    if c1 == 0 then
+        st.rej = "few-commas: " .. string.sub(s, 1, 60)
+        return false
+    end
+
+    local ity = num_or(string.sub(rest, c2 + 1, c3 - 1), -99)
+    if ity == -99 then
+        st.rej = "type-nan: " .. string.sub(s, 1, 60)
+        return false
     end
 
     local it = {
         serial = serial,
-        flags  = trim(f[2]),
-        name   = trim(decode(trim(name))),
-        level  = num_or(f[n - 4], 0),
-        itype  = num_or(f[n - 3], 0),
-        unique = num_or(f[n - 2], 0),
-        wear   = num_or(f[n - 1], -1),
-        timer  = num_or(f[n], -1),
+        flags  = trim(flags),
+        name   = trim(decode(trim(string.sub(rest, 1, c1 - 1)))),
+        level  = num_or(string.sub(rest, c1 + 1, c2 - 1), 0),
+        itype  = ity,
+        unique = num_or(string.sub(rest, c3 + 1, c4 - 1), 0),
+        wear   = num_or(string.sub(rest, c4 + 1, c5 - 1), -1),
+        timer  = num_or(string.sub(rest, c5 + 1), -1),
         where  = where,
     }
     db.items[serial] = it
-    table.insert(st.buf, serial)
     st.nParsed = st.nParsed + 1
     return true
 end
@@ -1909,6 +1951,9 @@ function init()
             utilprint(TAG .. "gag " .. tostring(cfg.gag) .. " | auto "
                 .. tostring(cfg.auto) .. " | id pending '" .. ids.pending
                 .. "' | id queue " .. #ids.q)
+            if st.rej ~= "" then
+                utilprint(TAG .. "last rejected row: " .. st.rej)
+            end
 
         elseif low == "refresh" then
             refresh(false)
