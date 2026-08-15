@@ -75,7 +75,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "2.0.2",
+    version     = "2.0.3",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -83,8 +83,10 @@ plugin = {
 
 -- @category widgets
 
-local TAG  = "$Y[Inventory v" .. plugin.version .. "]$w "
-local TAGR = "$R[Inventory v" .. plugin.version .. "]$w "
+-- utilprint on this client already prefixes output with the plugin's
+-- display name, so the tag is just colour, not a second nameplate
+local TAG  = "$w"
+local TAGR = "$R! $w"
 
 local MAX_ROWS   = 400      -- rendered rows; the table itself is unbounded
 local BLOCK_MS   = 10000    -- release a block that never closes
@@ -144,6 +146,8 @@ local st = {
     pokeTimer  = nil,    -- invmon debounce
     lastAuto   = 0,      -- value of clockMs at the last auto refresh
     clockMs    = 0,      -- counter of debounce windows, bumped per invmon burst
+    -- lifetime counters, so /awinv debug can say which stage went quiet
+    nSent = 0, nOpen = 0, nClose = 0, nRow = 0, nParsed = 0,
 }
 
 local widget  = nil
@@ -278,7 +282,8 @@ end
 local function font_base()
     if cfg.fov >= 6 and cfg.fov <= 48 then return cfg.fov .. "px" end
     if cfg.fpx >= 6 and cfg.fpx <= 48 then return cfg.fpx .. "px" end
-    return "clamp(9px, 2.2vmin, 20px)"
+    -- floor of 14 by request; still grows with the panel past that
+    return "clamp(14px, 2.6vmin, 22px)"
 end
 
 --[[
@@ -414,6 +419,7 @@ local function parse_row(line, where)
     }
     db.items[serial] = it
     table.insert(st.buf, serial)
+    st.nParsed = st.nParsed + 1
     return true
 end
 
@@ -1503,6 +1509,7 @@ local function take_expected(tagname)
 end
 
 local function on_open(c, line, w)
+    st.nOpen = st.nOpen + 1
     local base = (type(c[0]) == "string") and 0 or 1
     local tagname = tostring(c[base] or "")
     local kind = ""
@@ -1548,6 +1555,7 @@ local function on_open(c, line, w)
 end
 
 local function on_close(c, line, w)
+    st.nClose = st.nClose + 1
     if st.inBlock == "" then return end
 
     local wasMine = st.mine
@@ -1573,6 +1581,7 @@ end
 
 local function on_row(c, line, w, raw)
     if st.inBlock == "" then return end
+    st.nRow = st.nRow + 1
 
     local plain = trim(tostring(line or ""))
     if plain == "" then return end
@@ -1622,10 +1631,12 @@ local function refresh(withVault)
     send("invdata")
     table.insert(st.expect, { kind = "key", id = "", got = false })
     send("keyring data")
+    st.nSent = st.nSent + 3
 
     if withVault == true then
         table.insert(st.expect, { kind = "vault", id = "", got = false })
         send("vault data")
+        st.nSent = st.nSent + 1
     end
 end
 
@@ -1875,6 +1886,28 @@ function init()
 
         elseif low == "hide" then
             hideWidget(widget)
+
+        elseif low == "debug" then
+            --[[
+                Which stage went quiet. sent counts commands out; open/close
+                are {tag} markers seen; row is lines seen inside a block;
+                parsed is rows that became items. sent>0 with open=0 means
+                the blocks never arrived (or the openers never matched);
+                rows without parsed means the CSV shape surprised us.
+            ]]
+            local nItems = 0
+            for _, _x in pairs(db.items) do nItems = nItems + 1 end
+            local nStats = 0
+            for _, _x in pairs(ids.stats) do nStats = nStats + 1 end
+            utilprint(TAG .. "sent " .. st.nSent .. " | opens " .. st.nOpen
+                .. " | closes " .. st.nClose .. " | rows " .. st.nRow
+                .. " | parsed " .. st.nParsed)
+            utilprint(TAG .. "items " .. nItems .. " | id records " .. nStats
+                .. " | inBlock '" .. st.inBlock .. "' | expect " .. #st.expect
+                .. " | conQueue " .. #st.conQueue)
+            utilprint(TAG .. "gag " .. tostring(cfg.gag) .. " | auto "
+                .. tostring(cfg.auto) .. " | id pending '" .. ids.pending
+                .. "' | id queue " .. #ids.q)
 
         elseif low == "refresh" then
             refresh(false)

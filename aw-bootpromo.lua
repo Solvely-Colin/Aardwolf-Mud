@@ -27,7 +27,7 @@
 plugin = {
     id          = "aw-bootpromo",
     name        = "Boot Promotion Tracker",
-    version     = "2.0.1",
+    version     = "2.0.2",
     author      = "Catdad",
     description = "Boot Lyceum promotion progress - days in clan, QP, campaigns and goals against each tier's bar.",
     settings    = { saveState = true },
@@ -87,7 +87,8 @@ end
 local function font_base()
     if cfg.fov >= 6 and cfg.fov <= 48 then return cfg.fov .. "px" end
     if cfg.fpx >= 6 and cfg.fpx <= 48 then return cfg.fpx .. "px" end
-    return "clamp(10px, 3.2vmin, 20px)"
+    -- floor of 14 by request; still grows with the panel past that
+    return "clamp(14px, 3.4vmin, 22px)"
 end
 
 local function cap(c, w, n)
