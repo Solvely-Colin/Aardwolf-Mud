@@ -77,7 +77,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "2.5.0",
+    version     = "3.0.0",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -116,6 +116,10 @@ local cfg = {
     serials = true,      -- show serial numbers on rows
     fpx     = 0,         -- suite font px from Core's "aw-font" broadcast
     fov     = 0,         -- this panel's own font px; 0 = follow the suite
+    -- space-separated serials to leave alone: not scanned, not ranked,
+    -- not moved. Declared, because an unset field here is undefined and
+    -- undefined is truthy on this runtime.
+    ignored = "",
 }
 
 --[[
@@ -302,6 +306,34 @@ local prof = {
     flight, watchWear is true and the first {invmon} Removed event names
     the item the ring displaced; that is what gets re-worn on waking.
 ]]
+--[[
+    Stat ceilings, dinv's inv.statBonus — and the reason its set builder is
+    more than "pick the biggest number".
+
+    Aardwolf caps each stat at roughly your level, and your spellups
+    already supply part of that. Equipment can only usefully carry the
+    REMAINDER: ceiling = clamp(level - 10*tier, 25, 200) - spellBonus.
+    Weighting +int on an item whose int you already max is wasted budget,
+    which is exactly what our scoring did until now.
+
+    'stats' reports the Spells Bonus row; we keep a per-level average of
+    it the way dinv does (50/50 with the previous reading, so it converges
+    as you play). Until a reading exists, SEED interpolates dinv's own
+    top-end estimate down to zero, which is coarse but honest and stops
+    being used the moment you run 'stats' once.
+]]
+local sb = {
+    spell = {},          -- level -> "str,int,wis,dex,con,luck" as text
+    have  = false,
+    asked = false,
+}
+
+local SEED_TOP = { str = 70, intel = 86, wis = 70, dex = 105, con = 90, luck = 65 }
+local STAT6 = { "str", "intel", "wis", "dex", "con", "luck" }
+
+-- saved outfits: name -> comma-separated serials that were worn
+local snaps = {}
+
 local qol = {
     regen     = "",
     regenPrev = "",
@@ -657,7 +689,7 @@ end
 local function save_cfg()
     saveTable("aw_inv_cfg", {
         gag = cfg.gag, auto = cfg.auto, serials = cfg.serials,
-        fpx = cfg.fpx, fov = cfg.fov,
+        fpx = cfg.fpx, fov = cfg.fov, ignored = cfg.ignored,
     })
 end
 
@@ -1351,10 +1383,158 @@ local MAG_RES = { "acid", "air", "cold", "disease", "earth", "electric",
     "energy", "fire", "holy", "light", "magic", "mental", "negative",
     "poison", "shadow", "sonic", "water" }
 
-local function score_of(serial)
+---
+-- stat ceilings
+---
+
+local function char_tier()
+    local n = tonumber(gfield(getGMCPData("char.base"), "tier"))
+    if n == nil or n < 0 then return 0 end
+    return math.floor(n)
+end
+
+local function char_align()
+    local n = tonumber(gfield(getGMCPData("char.status"), "align"))
+    if n == nil then n = tonumber(gfield(getGMCPData("char.base"), "align")) end
+    if n == nil then return 0 end
+    return n
+end
+
+-- the spell bonus for a stat at a level: measured if we have it, else the
+-- seed interpolated from zero at level 1 to dinv's estimate at 211
+local function spell_bonus(level, stat)
+    local rec = sb.spell[level]
+    if type(rec) == "string" and rec ~= "" then
+        local i = 1
+        for part in string.gmatch(rec, "[^,]+") do
+            if STAT6[i] == stat then
+                local v = tonumber(part)
+                if v ~= nil then return v end
+            end
+            i = i + 1
+        end
+    end
+    local top = SEED_TOP[stat]
+    if top == nil then return 0 end
+    local lv = level
+    if lv > 211 then lv = 211 end
+    if lv < 1 then lv = 1 end
+    return math.floor(top * lv / 211)
+end
+
+-- how much of a stat equipment can still usefully carry at this level
+local function stat_ceiling(level, stat)
+    local base = level - 10 * char_tier()
+    if base < 25 then base = 25 end
+    if base > 200 then base = 200 end
+    local room = base - spell_bonus(level, stat)
+    if room < 0 then room = 0 end
+    return room
+end
+
+local function save_sb()
+    local rows = {}
+    for lv, txt in pairs(sb.spell) do
+        table.insert(rows, tostring(lv) .. "=" .. tostring(txt))
+    end
+    saveTable("aw_inv_sb", { blob = table.concat(rows, ";") })
+end
+
+local function load_sb()
+    local saved = loadTable("aw_inv_sb")
+    if type(saved) ~= "table" then return end
+    if type(saved.blob) ~= "string" or saved.blob == "" then return end
+    for pair in string.gmatch(saved.blob, "[^;]+") do
+        local eq = pfind(pair, "=")
+        if eq ~= nil and eq > 1 then
+            local lv = tonumber(string.sub(pair, 1, eq - 1))
+            if lv ~= nil then
+                sb.spell[math.floor(lv)] = string.sub(pair, eq + 1)
+                sb.have = true
+            end
+        end
+    end
+end
+
+--[[
+    The Spells Bonus row of 'stats':
+        Spells Bonus  :   12   40   38   10   20   15
+    columns str int wis dex con luck. Averaged 50/50 with whatever we had
+    for this level, dinv's own convergence.
+]]
+local function on_spells_bonus(c, line, w)
+    local nums = {}
+    for n in string.gmatch(tostring(line or ""), "%d+") do
+        table.insert(nums, tonumber(n))
+    end
+    if #nums < 6 then return end
+
+    local lv = char_level()
+    local prev = sb.spell[lv]
+    local out = {}
+    local i = 1
+    while i <= 6 do
+        local v = nums[i]
+        if type(prev) == "string" then
+            local j, old = 1, nil
+            for part in string.gmatch(prev, "[^,]+") do
+                if j == i then old = tonumber(part) end
+                j = j + 1
+            end
+            if old ~= nil then v = (v + old) / 2 end
+        end
+        table.insert(out, string.format("%.1f", v))
+        i = i + 1
+    end
+
+    sb.spell[lv] = table.concat(out, ",")
+    sb.have = true
+    save_sb()
+
+    if sb.asked == true then
+        sb.asked = false
+        utilprint(TAG .. "stat ceilings learned for level " .. lv
+            .. " - gear is now scored against the room your spellups leave.")
+        if render ~= nil then render() end
+    end
+end
+
+
+--[[
+    The weights in force at a level.
+
+    dinv's priorities are level-BANDED, and the deep dive calls that the
+    killer feature: sanctuary is worth 50 at level 1 because you cannot
+    cast it yet, and 5 by level 201 when every spellup has it; dual wield
+    is worth 20 until you learn the skill and 0 after. A flat table cannot
+    say that.
+
+    A band is stored as a plain weight table under the key "<name>@<min>",
+    so the flat form is just a profile with one band starting at 1 and
+    nothing else changes on disk.
+]]
+local function weights_at(name, level)
+    local best, bestMin = nil, -1
+    local prefix = name .. "@"
+    for k, ws in pairs(prof.sets) do
+        if type(ws) == "table" then
+            if k == name and bestMin < 0 then
+                best, bestMin = ws, 0
+            elseif pfind(k, prefix) == 1 then
+                local lo = tonumber(string.sub(k, #prefix + 1))
+                if lo ~= nil and lo <= level and lo > bestMin then
+                    best, bestMin = ws, lo
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function score_at(serial, level)
     local r = ids.stats[serial]
     if type(r) ~= "table" then return nil end
-    local ws = prof.sets[prof.active]
+    local ws = weights_at(prof.active, level)
     if type(ws) ~= "table" then return nil end
 
     local total = 0
@@ -1364,6 +1544,21 @@ local function score_of(serial)
             total = total + v * weight
         elseif r["aff_" .. stat] == 1 then
             total = total + weight
+        end
+    end
+
+    --[[
+        max<stat> pays a flat bonus for reaching the level's ceiling —
+        dinv's way of valuing a piece that finally caps a stat over one
+        that merely adds to it.
+    ]]
+    for _, stat in ipairs(STAT6) do
+        local bonus = tonumber(ws["max" .. stat])
+        if bonus ~= nil and bonus > 0 then
+            local have = tonumber(r[stat])
+            if have ~= nil and have >= stat_ceiling(level, stat) then
+                total = total + bonus
+            end
         end
     end
 
@@ -1382,8 +1577,21 @@ local function score_of(serial)
         end
     end
 
-    -- two decimals, once, at the end — dinv rounds the same way
     return tonumber(string.format("%.2f", total))
+end
+
+-- is this slot switched off for the active profile? (~slot = 1)
+local function slot_banned(slot, level)
+    local ws = weights_at(prof.active, level)
+    if type(ws) ~= "table" then return false end
+    local v = tonumber(ws["~" .. slot])
+    return v ~= nil and v ~= 0
+end
+
+-- the score at your current level; every caller that has no particular
+-- level in mind means "now"
+local function score_of(serial)
+    return score_at(serial, char_level())
 end
 
 -- the box says "Wearable : finger"; anything unlisted gets its own slot
@@ -1398,6 +1606,54 @@ local function slot_of(serial)
     return wearable
 end
 
+---
+-- eligibility: what this character can actually wear
+---
+
+--[[
+    dinv rejects gear the character cannot use before ranking it, so the
+    list never recommends something you would be refused. Alignment
+    restrictions and heroonly are carried in the identify Flags field.
+]]
+local function usable(serial, level)
+    local it = db.items[serial]
+    if type(it) ~= "table" then return false end
+    local r = ids.stats[serial]
+    if type(r) ~= "table" then return false end
+
+    local lv = tonumber(r.level)
+    if lv == nil then lv = it.level end
+    if lv == nil then lv = 0 end
+    if lv > level then return false end
+
+    local flags = string.lower(tostring(r.flags or "") .. " " .. tostring(it.flags or ""))
+
+    if pfind(flags, "heroonly") ~= nil then
+        if level - 10 * char_tier() < 200 then return false end
+    end
+
+    local al = char_align()
+    if pfind(flags, "anti-good") ~= nil and al >= 875 then return false end
+    if pfind(flags, "anti-evil") ~= nil and al <= -875 then return false end
+    if pfind(flags, "anti-neutral") ~= nil and al > -875 and al < 875 then
+        return false
+    end
+
+    if cfg.ignored ~= "" then
+        if pfind(" " .. cfg.ignored .. " ", " " .. serial .. " ") ~= nil then
+            return false
+        end
+        -- an item inside an ignored bag is ignored too
+        if pfind(it.where, "c:") == 1 then
+            local con = string.sub(it.where, 3)
+            if pfind(" " .. cfg.ignored .. " ", " " .. con .. " ") ~= nil then
+                return false
+            end
+        end
+    end
+    return true
+end
+
 --[[
     Best identified item(s) per wear location at or under a level. A slot
     with capacity two lists two. Returns rows already sorted for render:
@@ -1409,9 +1665,7 @@ local function best_set(level)
     for serial, r in pairs(ids.stats) do
         if type(r) == "table" and type(db.items[serial]) == "table" then
             local slot = slot_of(serial)
-            local lv = tonumber(r.level)
-            if lv == nil then lv = 0 end
-            if slot ~= "" and lv <= level then
+            if slot ~= "" and usable(serial, level) then
                 --[[
                     Zero-scoring items belong here too. dinv's set builder
                     takes any eligible item and keeps the highest score,
@@ -1432,7 +1686,17 @@ local function best_set(level)
 
     local slots = {}
     for slot, list in pairs(per) do
-        table.sort(list, function(x, y) return x.sc > y.sc end)
+        --[[
+            Ties are broken by serial so the same ring lands in the same
+            finger every rebuild. dinv normalises the multi-slot groups for
+            exactly this reason: without it a rebuild reshuffles equal
+            items between lfinger and rfinger and 'set wear' generates
+            pointless swaps.
+        ]]
+        table.sort(list, function(x, y)
+            if x.sc ~= y.sc then return x.sc > y.sc end
+            return x.serial < y.serial
+        end)
         table.insert(slots, slot)
     end
     table.sort(slots)
@@ -1451,6 +1715,236 @@ local function best_set(level)
                 worn = (type(it) == "table" and it.where == "eq"),
             })
             i = i + 1
+        end
+    end
+    return out
+end
+
+---
+-- analysis: what you would wear at every level
+--
+-- dinv computes the optimal set at each of 201 levels and caches it, then
+-- answers three questions from that cache: where does this item get used
+-- (usage), what would I lose without it (compare), and what changes as I
+-- level (analyze display). The expensive part is the sweep, so it runs
+-- once and everything else reads the result.
+--
+-- Ours sweeps in slices behind a timer rather than blocking: this client
+-- has no coroutines, and a 201-level loop in one go would freeze the UI.
+---
+
+local ana = {
+    prof  = "",          -- which profile the cache belongs to
+    step  = 10,          -- levels between samples
+    at    = 0,           -- sweep cursor
+    max   = 0,
+    rows  = {},          -- "level|slot" -> serial
+    busy  = false,
+}
+
+local function ana_key(level, slot)
+    return tostring(level) .. "|" .. slot
+end
+
+local function ana_clear()
+    ana.rows = {}
+    ana.prof = ""
+    ana.at = 0
+    ana.busy = false
+end
+
+local function ana_step()
+    if ana.busy ~= true then return end
+
+    -- one slice per tick keeps the client responsive on a big wardrobe
+    local done = 0
+    while done < 6 and ana.at <= ana.max do
+        for _, e in ipairs(best_set(ana.at)) do
+            ana.rows[ana_key(ana.at, e.slot)] = e.serial
+        end
+        ana.at = ana.at + ana.step
+        done = done + 1
+    end
+
+    if ana.at > ana.max then
+        ana.busy = false
+        utilprint(TAG .. "analysis complete for " .. ana.prof .. " - every "
+            .. ana.step .. " levels to " .. ana.max
+            .. ". Try '/awinv usage <query>' or '/awinv plan <slot>'.")
+        if render ~= nil then render() end
+        return
+    end
+
+    if ana.at % 50 < ana.step then
+        utilprint("$K  ...level " .. ana.at .. "$w")
+    end
+    addTimer(60, ana_step)
+end
+
+local function ana_start(step)
+    if ana.busy == true then
+        utilprint(TAGR .. "an analysis is already running.")
+        return
+    end
+    ana_clear()
+    ana.prof = prof.active
+    ana.step = (step ~= nil and step >= 1) and math.floor(step) or 10
+    ana.max = 201 + 10 * char_tier()
+    ana.at = 1
+    ana.busy = true
+    utilprint(TAG .. "analysing " .. prof.active .. " every " .. ana.step
+        .. " levels to " .. ana.max .. " - this runs in the background.")
+    ana_step()
+end
+
+-- the levels at which an item is the pick for one of its slots
+local function ana_usage(serial)
+    local out = {}
+    local lv = 1
+    while lv <= ana.max do
+        for slot, _cap in pairs(SLOT_CAP) do
+            if ana.rows[ana_key(lv, slot)] == serial then
+                table.insert(out, lv)
+                break
+            end
+        end
+        lv = lv + ana.step
+    end
+    return out
+end
+
+-- compress 10,20,30,60 into "10-30 60"
+local function ana_ranges(levels)
+    if #levels == 0 then return "" end
+    local out, runStart, prev = {}, levels[1], levels[1]
+    local i = 2
+    while i <= #levels + 1 do
+        local v = levels[i]
+        if v ~= nil and v == prev + ana.step then
+            prev = v
+        else
+            if runStart == prev then
+                table.insert(out, tostring(runStart))
+            else
+                table.insert(out, runStart .. "-" .. prev)
+            end
+            runStart, prev = v, v
+        end
+        i = i + 1
+    end
+    return table.concat(out, " ")
+end
+
+---
+-- wearing a set, and snapshots
+---
+
+--[[
+    Put a computed set on.
+
+    Order is not cosmetic. dinv sorts by wear location so HANDS go on
+    before the weapon slots, because Aardwolf's Gloves of Dexterity grant
+    dual wield — put the weapons on first and the offhand is refused.
+    Anything being replaced comes off first, so a shield and an offhand
+    weapon are never both on the body mid-swap.
+
+    Everything is sent as plain wear/remove and then a rescan settles the
+    truth; there is no critical section here as dinv had, so a command the
+    MUD refuses simply shows in your terminal and the rescan corrects the
+    table.
+]]
+local function wear_rows(rows)
+    local nOff, nOn = 0, 0
+
+    -- take off whatever occupies a slot the set wants for something else
+    for _, e in ipairs(rows) do
+        local it = db.items[e.serial]
+        if type(it) == "table" and it.where ~= "eq" then
+            for s2, i2 in pairs(db.items) do
+                if type(i2) == "table" and i2.where == "eq"
+                    and slot_of(s2) == e.slot and s2 ~= e.serial then
+                    send("remove " .. s2)
+                    nOff = nOff + 1
+                end
+            end
+        end
+    end
+
+    -- hands first, then everything else; a stable order beats a clever one
+    local order = {}
+    for _, e in ipairs(rows) do table.insert(order, e) end
+    table.sort(order, function(x, y)
+        local rank = function(s)
+            if s == "hands" then return 0 end
+            if s == "wield" or s == "shield" or s == "hold" then return 2 end
+            return 1
+        end
+        if rank(x.slot) ~= rank(y.slot) then return rank(x.slot) < rank(y.slot) end
+        return x.slot < y.slot
+    end)
+
+    for _, e in ipairs(order) do
+        local it = db.items[e.serial]
+        if type(it) == "table" and it.where ~= "eq" then
+            if pfind(it.where, "c:") == 1 then
+                send("get " .. e.serial .. " " .. string.sub(it.where, 3))
+            elseif it.where == "key" then
+                send("keyring get " .. e.serial)
+            end
+            send("wear " .. e.serial)
+            nOn = nOn + 1
+        end
+    end
+
+    return nOff, nOn
+end
+
+---
+-- snapshots: a literal record of what you are wearing, by serial
+---
+
+local function save_snaps()
+    local rows = {}
+    for name, txt in pairs(snaps) do
+        if type(txt) == "string" then
+            table.insert(rows, tostring(name) .. "=" .. txt)
+        end
+    end
+    saveTable("aw_inv_snaps", { blob = table.concat(rows, ";") })
+end
+
+local function load_snaps()
+    local saved = loadTable("aw_inv_snaps")
+    if type(saved) ~= "table" then return end
+    if type(saved.blob) ~= "string" or saved.blob == "" then return end
+    for pair in string.gmatch(saved.blob, "[^;]+") do
+        local eq = pfind(pair, "=")
+        if eq ~= nil and eq > 1 then
+            snaps[string.sub(pair, 1, eq - 1)] = string.sub(pair, eq + 1)
+        end
+    end
+end
+
+local function snap_take(name)
+    local out = {}
+    for serial, it in pairs(db.items) do
+        if type(it) == "table" and it.where == "eq" then
+            table.insert(out, serial)
+        end
+    end
+    table.sort(out)
+    snaps[name] = table.concat(out, ",")
+    save_snaps()
+    return #out
+end
+
+local function snap_rows(name)
+    local txt = snaps[name]
+    local out = {}
+    if type(txt) ~= "string" then return out end
+    for serial in string.gmatch(txt, "[^,]+") do
+        if type(db.items[serial]) == "table" then
+            table.insert(out, { slot = slot_of(serial), serial = serial })
         end
     end
     return out
@@ -1598,6 +2092,18 @@ local CSS_HEAD = [==[
     .arc-i .fI { color: #8a8a8a; } .arc-i .fC { color: #a06cd5; }
     .arc-i .fT { color: #e0a95c; } .arc-i .fE { color: #7bc47b; }
     .arc-i .fW { color: #777777; }
+    .arc-i .gd {
+        border-left: 2px solid hsl(var(--border, 0 22% 17%));
+        padding: 4px 0 6px 8px; margin-bottom: 6px; line-height: 1.5;
+        color: hsl(var(--muted-foreground, 35 14% 52%));
+    }
+    .arc-i .gd.done { border-left-color: #3CB371; }
+    .arc-i .gd.done b { color: #3CB371; }
+    .arc-i .gd.now {
+        border-left-color: hsl(var(--primary, 0 72% 42%));
+        color: hsl(var(--foreground, 35 34% 78%));
+        background: rgba(147,25,24,0.08);
+    }
     .arc-i .btns {
         display: flex; flex-wrap: wrap; gap: 4px;
         margin-bottom: 6px;
@@ -1955,7 +2461,11 @@ local MENU = {
     { g = "View",     l = "use",          c = "use",          t = "consumables and portals" },
     { g = "View",     l = "clear filter", c = "search",       t = "drop the current filter" },
 
-    { g = "Gear",     l = "profiles",     c = "prio",              t = "list scoring profiles and their weights" },
+    { g = "Gear",     l = "wear best",    c = "wear",              t = "put on the best set this profile can build" },
+    { g = "Gear",     l = "save outfit",   c = "snap",              t = "saved outfits: save, wear, delete" },
+    { g = "Gear",     l = "read stats",    c = "stats",             t = "learn your stat ceilings from spell bonuses" },
+    { g = "Gear",     l = "analyse",       c = "analyze",           t = "work out what you would wear at every level" },
+    { g = "Gear",     l = "profiles",      c = "prio",              t = "list scoring profiles and their weights" },
     { g = "Gear",     l = "psi",          c = "prio use psi",       t = "Aardwolf's psionicist weighting" },
     { g = "Gear",     l = "mage",         c = "prio use mage",      t = "Aardwolf's mage weighting" },
     { g = "Gear",     l = "cleric",       c = "prio use cleric",    t = "Aardwolf's cleric weighting" },
@@ -1983,6 +2493,79 @@ local MENU = {
     { g = "Data",     l = "auto",         c = "auto",         t = "rescan automatically as your inventory changes" },
     { g = "Data",     l = "diagnostics",  c = "debug",        t = "counters and a parser self-test" },
 }
+
+--[[
+    The guide: what to do, in order, with the current step highlighted.
+
+    dinv's own documentation leads with a Day-1 workflow because the
+    plugin is useless until the table exists and nearly magic afterwards.
+    The panel can do better than documentation by knowing which step you
+    are actually on.
+]]
+local function render_guide()
+    local nItems, nId = 0, 0
+    for _, _x in pairs(db.items) do nItems = nItems + 1 end
+    for _, r in pairs(ids.stats) do
+        if type(r) == "table" then nId = nId + 1 end
+    end
+
+    local step = 1
+    if nItems > 0 then step = 2 end
+    if nId > 0 then step = 3 end
+    if sb.have == true then step = 4 end
+    if ana.prof ~= "" then step = 5 end
+
+    local row = function(n, title, body, cmd, label)
+        local cls = "gd"
+        if n < step then cls = "gd done" end
+        if n == step then cls = "gd now" end
+        local btn = ""
+        if cmd ~= "" then
+            btn = ' <span class="tb" data-mud-action="cmd" data-mud-data="'
+                .. esc(cmd) .. '">' .. label .. "</span>"
+        end
+        return '<div class="' .. cls .. '"><b>' .. n .. ". " .. title
+            .. "</b><br>" .. body .. btn .. "</div>"
+    end
+
+    local out = {}
+    table.insert(out, '<div class="sec">Getting set up</div>')
+
+    table.insert(out, row(1, "Index what you own",
+        "Reads your worn gear, inventory, bags and keyring. Stand somewhere "
+        .. "quiet &#8212; it moves items about.", "build", "run build"))
+
+    table.insert(out, row(2, "Identify it",
+        "Reads each item's stats into the database. Gear is removed and "
+        .. "re-worn as it goes. Runs automatically after a build; this "
+        .. "catches anything new. <b>" .. nId .. "</b> known so far.",
+        "id missing", "identify new items"))
+
+    table.insert(out, row(3, "Learn your stat ceilings",
+        "Reads your spell bonuses so gear is judged on the room your "
+        .. "spellups actually leave. Worth redoing when you level or "
+        .. "change spellups.", "stats", "read stats"))
+
+    table.insert(out, row(4, "Pick how you want to be scored",
+        "A profile says what a point of each stat is worth to you. "
+        .. "Currently <b>" .. esc(prof.active) .. "</b>.", "prio", "see profiles"))
+
+    table.insert(out, row(5, "Plan ahead",
+        "Works out what you would wear at every level, so you can see where "
+        .. "your gear runs thin. Takes a moment and then answers instantly.",
+        "analyze", "analyse"))
+
+    table.insert(out, '<div class="sec">Then, day to day</div>')
+    table.insert(out, '<div class="note">'
+        .. "<b>best</b> ranks your gear now &#183; <b>wear</b> puts the best set on "
+        .. "&#183; <b>snap save &lt;name&gt;</b> remembers an outfit &#183; "
+        .. "<b>find &lt;query&gt;</b> searches everything you own.<br><br>"
+        .. "Queries read like sentences: <code>type weapon minlevel 100</code>, "
+        .. "<code>worn</code>, <code>kw favourite</code>, "
+        .. "<code>type potion || type pill</code>.</div>")
+
+    return table.concat(out, "\n")
+end
 
 local function render_menu()
     local out = {}
@@ -2072,6 +2655,8 @@ render = function()
         body = render_best()
     elseif view == "menu" then
         body = render_menu()
+    elseif view == "guide" then
+        body = render_guide()
     elseif view == "use" then
         body = render_use()
     else
@@ -2133,7 +2718,7 @@ render = function()
         .. '<span class="sub">' .. count_where("inv") .. " carried</span>"
         .. '<span class="sp"></span>'
         .. tab("list", "items") .. tab("best", "best") .. tab("use", "use")
-        .. tab("menu", "menu")
+        .. tab("menu", "menu") .. tab("guide", "guide")
         .. '<div class="tb" data-mud-action="refresh" title="rescan eq, inventory, containers and keyring">refresh</div>'
         .. '<div class="tb" data-mud-action="close" title="put the panel away">hide</div>'
         .. '<div class="tb' .. (view == "settings" and " on" or "")
@@ -2438,6 +3023,7 @@ function init()
         if saved.gag == false then cfg.gag = false end
         if saved.auto == false then cfg.auto = false end
         if saved.serials == false then cfg.serials = false end
+        if type(saved.ignored) == "string" then cfg.ignored = saved.ignored end
         local fp = tonumber(saved.fpx)
         if fp ~= nil and fp >= 6 and fp <= 48 then cfg.fpx = math.floor(fp) end
         fp = tonumber(saved.fov)
@@ -2525,7 +3111,8 @@ function init()
             view = (view ~= "settings") and "settings" or "list"
         elseif action == "tab" then
             view = tostring(data.data or "list")
-            if view ~= "best" and view ~= "use" and view ~= "menu" then
+            if view ~= "best" and view ~= "use" and view ~= "menu"
+                and view ~= "guide" then
                 view = "list"
             end
         elseif action == "item" then
@@ -2816,6 +3403,219 @@ function init()
                 send(mud)
                 addTimer(600, function() refresh(false) end)
             end
+
+        elseif low == "wear" or string.sub(low, 1, 5) == "wear " then
+            --[[
+                Put on the best set this profile can build. The ranking was
+                always there; this is the command that acts on it.
+            ]]
+            local lvArg = tonumber(trim(string.sub(low, 5)))
+            local lv = (lvArg ~= nil) and math.floor(lvArg) or char_level()
+            local rows = best_set(lv)
+            if #rows == 0 then
+                utilprint(TAGR .. "nothing to wear - identify your gear first "
+                    .. "('/awinv build').")
+            else
+                local nOff, nOn = wear_rows(rows)
+                if nOn == 0 then
+                    utilprint(TAG .. "already wearing the best set for "
+                        .. prof.active .. " at level " .. lv .. ".")
+                else
+                    utilprint(TAG .. "wearing the " .. prof.active .. " set for level "
+                        .. lv .. ": " .. nOn .. " on, " .. nOff .. " off.")
+                    addTimer(1500, function() refresh(false) end)
+                end
+            end
+
+        elseif low == "snap" or string.sub(low, 1, 5) == "snap " then
+            local rest = trim(string.sub(a, 5))
+            local restLow = string.lower(rest)
+            local sp = pfind(restLow, " ")
+            local op = (sp ~= nil) and string.sub(restLow, 1, sp - 1) or restLow
+            local nm = (sp ~= nil) and trim(string.sub(rest, sp + 1)) or ""
+            nm = string.gsub(string.lower(nm), "[^a-z0-9_-]", "")
+
+            if op == "save" and nm ~= "" then
+                local n = snap_take(nm)
+                utilprint(TAG .. "outfit '" .. nm .. "' saved - " .. n .. " item(s).")
+                render()
+            elseif op == "wear" and nm ~= "" and type(snaps[nm]) == "string" then
+                local rows = snap_rows(nm)
+                local nOff, nOn = wear_rows(rows)
+                utilprint(TAG .. "wearing outfit '" .. nm .. "': " .. nOn
+                    .. " on, " .. nOff .. " off.")
+                if nOn > 0 then addTimer(1500, function() refresh(false) end) end
+            elseif op == "del" and nm ~= "" then
+                snaps[nm] = nil
+                save_snaps()
+                render()
+                utilprint(TAG .. "outfit '" .. nm .. "' deleted.")
+            else
+                local names = {}
+                for k, _v in pairs(snaps) do table.insert(names, k) end
+                table.sort(names)
+                if #names == 0 then
+                    utilprint(TAG .. "no saved outfits. '/awinv snap save <name>' "
+                        .. "records what you are wearing now.")
+                else
+                    utilprint(TAG .. "outfits: " .. table.concat(names, ", "))
+                    utilprint("$w  /awinv snap save|wear|del <name>")
+                end
+            end
+
+        elseif string.sub(low, 1, 6) == "store " or low == "store" then
+            --[[
+                Send things back where they came from. The home bag is
+                recorded when a scan finds an item inside one, so this
+                undoes a 'get' without you naming the container.
+            ]]
+            local hits = q_find(trim(string.sub(a, 6)))
+            local n = 0
+            for _, serial in ipairs(hits) do
+                local r = ids.stats[serial]
+                local home = (type(r) == "table") and tostring(r.home or "") or ""
+                local it = db.items[serial]
+                if home ~= "" and type(db.items[home]) == "table"
+                    and it.where ~= "c:" .. home then
+                    if it.where == "eq" then send("remove " .. serial) end
+                    send("put " .. serial .. " " .. home)
+                    n = n + 1
+                end
+            end
+            utilprint(TAG .. n .. " item(s) returned to their bags.")
+            if n > 0 then addTimer(1200, function() refresh(false) end) end
+
+        elseif string.sub(low, 1, 6) == "ignore" then
+            local rest = trim(string.sub(low, 7))
+            local sp = pfind(rest, " ")
+            local op = (sp ~= nil) and string.sub(rest, 1, sp - 1) or rest
+            local who = (sp ~= nil) and trim(string.sub(rest, sp + 1)) or ""
+
+            if op == "on" and who ~= "" then
+                if pfind(" " .. cfg.ignored .. " ", " " .. who .. " ") == nil then
+                    cfg.ignored = trim(cfg.ignored .. " " .. who)
+                    save_cfg()
+                end
+                render()
+                utilprint(TAG .. who .. " ignored - not scanned, ranked or moved.")
+            elseif op == "off" and who ~= "" then
+                local keep = {}
+                for wd in string.gmatch(cfg.ignored, "%S+") do
+                    if wd ~= who then table.insert(keep, wd) end
+                end
+                cfg.ignored = table.concat(keep, " ")
+                save_cfg()
+                render()
+                utilprint(TAG .. who .. " no longer ignored.")
+            else
+                if cfg.ignored == "" then
+                    utilprint(TAG .. "nothing ignored. '/awinv ignore on <serial>' "
+                        .. "leaves a bag or item alone.")
+                else
+                    utilprint(TAG .. "ignored: " .. cfg.ignored)
+                end
+            end
+
+        elseif low == "analyze" or string.sub(low, 1, 8) == "analyze " then
+            local n = tonumber(trim(string.sub(low, 8)))
+            ana_start(n)
+
+        elseif string.sub(low, 1, 6) == "usage " then
+            if ana.prof == "" then
+                utilprint(TAGR .. "no analysis yet - run '/awinv analyze' first.")
+            else
+                local hits = q_find(trim(string.sub(a, 6)))
+                utilprint(TAG .. "usage under " .. ana.prof .. ":")
+                local shown = 0
+                for _, serial in ipairs(hits) do
+                    if shown < 30 then
+                        local lv = ana_usage(serial)
+                        local it = db.items[serial]
+                        local txt = (#lv > 0) and ("$Glevels " .. ana_ranges(lv))
+                            or "$Kunused"
+                        utilprint("$w  " .. it.name .. "$w  " .. txt .. "$w")
+                        shown = shown + 1
+                    end
+                end
+                if shown == 0 then utilprint("$K  nothing matched.$w") end
+            end
+
+        elseif string.sub(low, 1, 5) == "plan " then
+            --[[
+                dinv's 'analyze display <position>': the upgrade path for
+                one slot. Only the levels where the pick CHANGES are worth
+                printing — that is where you act.
+            ]]
+            if ana.prof == "" then
+                utilprint(TAGR .. "no analysis yet - run '/awinv analyze' first.")
+            else
+                local slot = trim(string.sub(low, 5))
+                utilprint(TAG .. "upgrade path for " .. slot
+                    .. " under " .. ana.prof .. ":")
+                local prev, lv, shown = "", 1, 0
+                while lv <= ana.max do
+                    local serial = ana.rows[ana_key(lv, slot)]
+                    local cur = (serial ~= nil) and serial or ""
+                    if cur ~= prev then
+                        if cur == "" then
+                            utilprint("$w  level " .. lv .. ": $Knothing$w")
+                        else
+                            local it = db.items[cur]
+                            utilprint("$w  level " .. lv .. ": $C"
+                                .. ((type(it) == "table") and it.name or cur) .. "$w")
+                        end
+                        prev = cur
+                        shown = shown + 1
+                    end
+                    lv = lv + ana.step
+                end
+                if shown == 0 then
+                    utilprint("$K  nothing ranks for that slot. Slot names: "
+                        .. "head eyes ear neck back medal torso body waist arms "
+                        .. "wrist hands finger legs feet shield wield hold float$w")
+                end
+            end
+
+        elseif string.sub(low, 1, 8) == "compare " then
+            --[[
+                What one item is worth: how many slot-levels it wins, and
+                what would take its place if you lost it.
+            ]]
+            if ana.prof == "" then
+                utilprint(TAGR .. "no analysis yet - run '/awinv analyze' first.")
+            else
+                local who = trim(string.sub(a, 8))
+                local serial = who
+                if tonumber(who) == nil then
+                    local hits = q_find(who)
+                    serial = (hits[1] ~= nil) and hits[1] or ""
+                end
+                local it = db.items[serial]
+                if type(it) ~= "table" then
+                    utilprint(TAGR .. "no item matching '" .. who .. "'.")
+                else
+                    local lv = ana_usage(serial)
+                    local sc = score_of(serial)
+                    utilprint(TAG .. it.name .. " (" .. serial .. ")")
+                    utilprint("$w  scores " .. tostring(sc) .. " under "
+                        .. prof.active .. " at your level")
+                    if #lv == 0 then
+                        utilprint("$w  $Knever the best choice for its slot - safe to "
+                            .. "sell or store.$w")
+                    else
+                        utilprint("$w  best in slot at $Glevels " .. ana_ranges(lv)
+                            .. "$w (" .. #lv .. " of " .. math.floor(ana.max / ana.step)
+                            .. " sampled levels)")
+                    end
+                end
+            end
+
+        elseif low == "stats" then
+            -- ask the MUD for the spell bonuses that set the stat ceilings
+            sb.asked = true
+            send("stats")
+            utilprint(TAG .. "reading your spell bonuses to learn how much room "
+                .. "equipment still has at level " .. char_level() .. "...")
 
         elseif low == "bags" then
             --[[
@@ -3196,6 +3996,15 @@ function init()
             utilprint("$w  /awinv pass <item> <secs>  hold an area pass briefly")
             utilprint("$w  /awinv id <serial|missing|all|stop>   identify into the database")
             utilprint("$w  /awinv best                best identified item per slot")
+            utilprint("$w  /awinv wear [level]        put that set on")
+            utilprint("$w  /awinv snap save|wear|del <name>   saved outfits")
+            utilprint("$w  /awinv stats               learn stat ceilings from spell bonuses")
+            utilprint("$w  /awinv analyze [step]      what you'd wear at every level")
+            utilprint("$w  /awinv plan <slot>         upgrade path for one slot")
+            utilprint("$w  /awinv usage <query>       where these items get used")
+            utilprint("$w  /awinv compare <item>      is this item worth keeping")
+            utilprint("$w  /awinv store <query>       put things back in their bags")
+            utilprint("$w  /awinv ignore on|off <serial>      leave a bag alone")
             utilprint("$w  /awinv use [serial]        consumables/portals view, or use one")
             utilprint("$w  /awinv go <serial>         hold a portal and enter it")
             utilprint("$w  /awinv score <serial>      score one item")
