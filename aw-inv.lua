@@ -75,7 +75,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "2.0.3",
+    version     = "2.0.4",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -1033,7 +1033,7 @@ end
 local CSS_HEAD = [==[
 <style>
     .arc-i {
-        font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-family: "JetBrains Mono", "JetBrainsMono Nerd Font", "JetBrainsMono NF", ui-monospace, Consolas, monospace;
         font-size: 10px;   /* overridden inline on the root div */
         color: hsl(var(--foreground, 35 34% 78%));
         height: 100%; box-sizing: border-box;
@@ -1508,16 +1508,15 @@ local function take_expected(tagname)
     return e
 end
 
-local function on_open(c, line, w)
+--[[
+    One opener per tag, kind bound by closure rather than read from a
+    capture. The first build used one trigger with a capturing alternation
+    and a trailing optional group — and it never fired once against the
+    live client, while every shipping plugin's triggers are plain patterns
+    or (?:non-capturing) groups. Mirror what is measured to work.
+]]
+local function open_kind(kind, tagname)
     st.nOpen = st.nOpen + 1
-    local base = (type(c[0]) == "string") and 0 or 1
-    local tagname = tostring(c[base] or "")
-    local kind = ""
-    if tagname == "eqdata" then kind = "eq" end
-    if tagname == "invdata" then kind = "inv" end
-    if tagname == "keyring" then kind = "key" end
-    if tagname == "vault" then kind = "vault" end
-    if kind == "" then return end
 
     local e = take_expected(kind)
 
@@ -1752,16 +1751,22 @@ function init()
         enabled        = false,
     })
 
-    addTrigger("^\\{(invdata|eqdata|keyring|vault)( [0-9]+)?\\}", on_open,
-        { type = "regex", priority = 70, keepEvaluating = true })
-    addTrigger("^\\{/(invdata|eqdata|keyring|vault)\\}", on_close,
-        { type = "regex", priority = 70, keepEvaluating = true })
+    addTrigger("^\\{eqdata\\}", function(c, l, w) return open_kind("eq", "eqdata") end,
+        { type = "regex", priority = 70 })
+    addTrigger("^\\{invdata\\}", function(c, l, w) return open_kind("inv", "invdata") end,
+        { type = "regex", priority = 70 })
+    addTrigger("^\\{keyring\\}", function(c, l, w) return open_kind("key", "keyring") end,
+        { type = "regex", priority = 70 })
+    addTrigger("^\\{vault\\}", function(c, l, w) return open_kind("vault", "vault") end,
+        { type = "regex", priority = 70 })
+    addTrigger("^\\{/(?:invdata|eqdata|keyring|vault)\\}", on_close,
+        { type = "regex", priority = 70 })
     addTrigger("^\\{vaultcounts\\}([0-9]+),([0-9]+),([0-9]+)", on_vaultcounts,
-        { type = "regex", priority = 70, keepEvaluating = true })
+        { type = "regex", priority = 70 })
     addTrigger("^\\{invmon\\}", on_invmon,
-        { type = "regex", priority = 40, keepEvaluating = true })
-    addTrigger("^You dream about (being able to keyring|checking your vault)\\.$",
-        on_dream, { type = "regex", priority = 40, keepEvaluating = true })
+        { type = "regex", priority = 40 })
+    addTrigger("^You dream about (?:being able to keyring|checking your vault)\\.$",
+        on_dream, { type = "regex", priority = 40 })
 
     --[[
         The identify box, aw-loot's patterns: Keywords opens it, | and +
@@ -1772,14 +1777,14 @@ function init()
     ]]
     ids.trigs = {}
     table.insert(ids.trigs, addTrigger("^\\| Keywords\\s+:\\s*(.+?)\\s*\\|$", on_id_open,
-        { type = "regex", priority = 45, keepEvaluating = true, enabled = false }))
+        { type = "regex", priority = 45, enabled = false }))
     table.insert(ids.trigs, addTrigger("^[|+](.*)$", on_id_row,
-        { type = "regex", priority = 45, keepEvaluating = true, enabled = false }))
+        { type = "regex", priority = 45, enabled = false }))
     table.insert(ids.trigs, addTrigger("^[^|+].*$", on_id_close,
-        { type = "regex", priority = 45, keepEvaluating = true, enabled = false }))
+        { type = "regex", priority = 45, enabled = false }))
 
     addTrigger("^You wake and stand up\\.$", on_wake,
-        { type = "regex", priority = 45, keepEvaluating = true })
+        { type = "regex", priority = 45 })
 
     drop_handlers(widget, "action")
     registerWidgetEvent(widget, "action", function(data)

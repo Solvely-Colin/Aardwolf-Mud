@@ -27,7 +27,7 @@
 plugin = {
     id          = "aw-bootpromo",
     name        = "Boot Promotion Tracker",
-    version     = "2.0.2",
+    version     = "2.0.3",
     author      = "Catdad",
     description = "Boot Lyceum promotion progress - days in clan, QP, campaigns and goals against each tier's bar.",
     settings    = { saveState = true },
@@ -35,8 +35,8 @@ plugin = {
 
 -- @category widgets
 
-local TAG  = "$Y[Promo v" .. plugin.version .. "]$w "
-local TAGR = "$R[Promo v" .. plugin.version .. "]$w "
+local TAG  = "$w"
+local TAGR = "$R! $w"
 
 -- the tiers, per aardwolfboot.com/promotion-guide
 local RANKS = {
@@ -182,7 +182,7 @@ end
 local CSS_HEAD = [==[
 <style>
     .arc-p {
-        font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-family: "JetBrains Mono", "JetBrainsMono Nerd Font", "JetBrainsMono NF", ui-monospace, Consolas, monospace;
         font-size: 10px;   /* overridden inline on the root div */
         color: hsl(var(--foreground, 35 34% 78%));
         height: 100%; box-sizing: border-box;
@@ -458,31 +458,31 @@ function init()
 
     -- whois: the header line says whose whois it is; the stat lines follow
     addTrigger("^\\[\\s*\\d+\\s+T\\d+.*?\\]\\s+(\\w+)", on_whois_header,
-        { type = "regex", priority = 45, keepEvaluating = true })
+        { type = "regex", priority = 45 })
     addTrigger("^Qp Earned\\s*:\\s*\\[\\s*(\\d+)\\s*\\]", function(c, line, w)
         whois_capture(c, w, "qp", "QP earned")
-    end, { type = "regex", priority = 45, keepEvaluating = true })
+    end, { type = "regex", priority = 45 })
     addTrigger("Campaigns Done\\s*:\\s*\\[\\s*(\\d+)\\s*\\]", function(c, line, w)
         whois_capture(c, w, "cp", "Campaigns")
-    end, { type = "regex", priority = 45, keepEvaluating = true })
+    end, { type = "regex", priority = 45 })
     addTrigger("Gquests Won\\s*:\\s*\\[\\s*(\\d+)\\s*\\]", function(c, line, w)
         whois_capture(c, w, "gq", "GQuest wins")
-    end, { type = "regex", priority = 45, keepEvaluating = true })
+    end, { type = "regex", priority = 45 })
     addTrigger("Quests Complete\\s*:\\s*\\[\\s*(\\d+)\\s*\\]", function(c, line, w)
         whois_capture(c, w, "quests", "Quests")
-    end, { type = "regex", priority = 45, keepEvaluating = true })
+    end, { type = "regex", priority = 45 })
 
     -- goals sync straight off 'score'; no self-check needed, score is yours
     addTrigger("Goals done\\s*:\\s*\\[\\s*(\\d+)\\s*\\]", function(c, line, w)
         set_counter("goals", tonumber(cap(c, w, 1)), "Goals")
-    end, { type = "regex", priority = 45, keepEvaluating = true })
+    end, { type = "regex", priority = 45 })
 
     addTrigger("As a reward, I am giving you (\\d+) quest points", on_quest_done,
-        { type = "regex", priority = 45, keepEvaluating = true })
+        { type = "regex", priority = 45 })
     addTrigger("You have completed your campaign", on_cp_done,
-        { type = "regex", priority = 45, keepEvaluating = true })
+        { type = "regex", priority = 45 })
     addTrigger("Global Quest.*has been won by (\\w+)", on_gq_won,
-        { type = "regex", priority = 45, keepEvaluating = true })
+        { type = "regex", priority = 45 })
 
     drop_handlers(widget, "action")
     registerWidgetEvent(widget, "action", function(data)
