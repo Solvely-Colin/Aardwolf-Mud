@@ -77,7 +77,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "2.2.1",
+    version     = "2.3.0",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -173,6 +173,10 @@ local rowTrig = nil
 -- invmon path repaint and are defined first (see MUDFORGE-NOTES on forward
 -- declarations binding the global when they sit below their callers)
 local render = nil
+
+-- the command handler, assigned in init(); panel buttons dispatch through
+-- it so there is exactly one implementation of every action
+local do_cmd = nil
 
 --[[
     Identify database and engine state. stats[serial] is a flat record of
@@ -1238,6 +1242,10 @@ local CSS_HEAD = [==[
     .arc-i .fI { color: #8a8a8a; } .arc-i .fC { color: #a06cd5; }
     .arc-i .fT { color: #e0a95c; } .arc-i .fE { color: #7bc47b; }
     .arc-i .fW { color: #777777; }
+    .arc-i .btns {
+        display: flex; flex-wrap: wrap; gap: 4px;
+        margin-bottom: 6px;
+    }
     .arc-i .note {
         font-size: 0.85em; line-height: 1.55; margin-top: 7px;
         color: hsl(var(--muted-foreground, 35 14% 52%));
@@ -1424,10 +1432,41 @@ local function render_item(serial)
         end
     end
 
-    table.insert(out, '<div class="bar" style="padding:6px 0 0;border:0">'
-        .. '<div class="tb" data-mud-action="ident" data-mud-data="' .. esc(serial)
-        .. '">identify</div>'
-        .. '<div class="tb" data-mud-action="tab" data-mud-data="list">back</div></div>')
+    --[[
+        Actions for THIS item. What is offered depends on where it sits:
+        worn things come off, carried things go on or into a bag, bagged
+        things come out. Every button is the command it would be typed as,
+        so the panel and the keyboard cannot disagree.
+    ]]
+    local btn = function(label, cmd, tip)
+        return '<div class="tb" data-mud-action="cmd" data-mud-data="'
+            .. esc(cmd) .. '" title="' .. esc(tip) .. '">' .. label .. "</div>"
+    end
+
+    local acts = btn("identify", "id " .. serial, "read its stats into the database")
+
+    if it.where == "eq" then
+        acts = acts .. btn("remove", "do remove " .. serial, "take it off")
+    elseif it.where == "inv" then
+        if it.itype == 8 or it.itype == 19 or it.itype == 2 or it.itype == 14 then
+            acts = acts .. btn("use", "use " .. serial, "quaff, eat or recite it")
+        elseif it.itype == 20 or it.itype == 15 then
+            acts = acts .. btn("enter", "go " .. serial, "hold it and enter")
+        else
+            acts = acts .. btn("wear", "do wear " .. serial, "put it on")
+        end
+        acts = acts .. btn("drop", "do drop " .. serial, "drop it here")
+    elseif pfind(it.where, "c:") == 1 then
+        acts = acts .. btn("take out", "do get " .. serial .. " "
+            .. string.sub(it.where, 3), "get it from its container")
+    end
+
+    if it.itype == 11 then
+        acts = acts .. btn("scan bag", "scan " .. serial, "index what is inside it")
+    end
+
+    table.insert(out, '<div class="sec">Do</div><div class="btns">' .. acts
+        .. btn("&#9664; back", "show", "back to the list") .. "</div>")
 
     return table.concat(out, "\n")
 end
@@ -1466,6 +1505,62 @@ end
     the buttons here go straight at the item: quaff/eat/recite by type,
     hold-and-enter for portals.
 ]]
+--[[
+    The menu: every action as a button, grouped, each carrying the command
+    text it runs. MENU is a flat list of {group, label, cmd, tip} rather
+    than nested tables — a nested table through this bridge is a liability
+    (NOTES 6) and a flat one renders in one pass.
+]]
+local MENU = {
+    { g = "Scan",     l = "build",        c = "build",        t = "full rescan, then identify everything unknown" },
+    { g = "Scan",     l = "refresh",      c = "refresh",      t = "rescan eq, inventory, containers and keyring" },
+    { g = "Scan",     l = "+ vault",      c = "vault",        t = "rescan including the vault (needs a vault here)" },
+    { g = "Scan",     l = "id missing",   c = "id missing",   t = "identify everything with no stats yet" },
+    { g = "Scan",     l = "id all",       c = "id all",       t = "re-identify everything, even known items" },
+    { g = "Scan",     l = "id stop",      c = "id stop",      t = "halt the identify pass" },
+
+    { g = "View",     l = "items",        c = "show",         t = "the item list" },
+    { g = "View",     l = "best",         c = "best",         t = "best identified item per wear location" },
+    { g = "View",     l = "use",          c = "use",          t = "consumables and portals" },
+    { g = "View",     l = "clear filter", c = "search",       t = "drop the current filter" },
+
+    { g = "Gear",     l = "profiles",     c = "prio",         t = "list scoring profiles and their weights" },
+    { g = "Gear",     l = "damage",       c = "prio use damage",   t = "score for damage" },
+    { g = "Gear",     l = "caster",       c = "prio use caster",   t = "score for casting" },
+    { g = "Gear",     l = "tank",         c = "prio use tank",     t = "score for survivability" },
+    { g = "Gear",     l = "balanced",     c = "prio use balanced", t = "score everything evenly" },
+
+    { g = "Data",     l = "backup",       c = "backup",       t = "save the item and identify stores" },
+    { g = "Data",     l = "restore",      c = "restore",      t = "load the last backup" },
+    { g = "Data",     l = "serials",      c = "serials",      t = "show or hide object ids on rows" },
+    { g = "Data",     l = "gag data",     c = "gag",          t = "hide the raw scan rows from the terminal" },
+    { g = "Data",     l = "auto",         c = "auto",         t = "rescan automatically as your inventory changes" },
+    { g = "Data",     l = "diagnostics",  c = "debug",        t = "counters and a parser self-test" },
+}
+
+local function render_menu()
+    local out = {}
+    local group = ""
+
+    for _, e in ipairs(MENU) do
+        if e.g ~= group then
+            if group ~= "" then out[#out + 1] = "</div>" end
+            group = e.g
+            out[#out + 1] = '<div class="sec">' .. esc(group) .. "</div>"
+            out[#out + 1] = '<div class="btns">'
+        end
+        out[#out + 1] = '<div class="tb" data-mud-action="cmd" data-mud-data="'
+            .. esc(e.c) .. '" title="' .. esc(e.t) .. '">' .. esc(e.l) .. "</div>"
+    end
+    if group ~= "" then out[#out + 1] = "</div>" end
+
+    out[#out + 1] = '<div class="note">Every button runs the command of the '
+        .. "same name &#8212; <code>/awinv " .. "help</code> lists them all, and "
+        .. "anything here can be typed instead.</div>"
+
+    return table.concat(out, "\n")
+end
+
 local function render_use()
     local out = {}
 
@@ -1529,6 +1624,8 @@ render = function()
         body = render_item(string.sub(view, 6))
     elseif view == "best" then
         body = render_best()
+    elseif view == "menu" then
+        body = render_menu()
     elseif view == "use" then
         body = render_use()
     else
@@ -1590,6 +1687,7 @@ render = function()
         .. '<span class="sub">' .. count_where("inv") .. " carried</span>"
         .. '<span class="sp"></span>'
         .. tab("list", "items") .. tab("best", "best") .. tab("use", "use")
+        .. tab("menu", "menu")
         .. '<div class="tb" data-mud-action="refresh" title="rescan eq, inventory, containers and keyring">refresh</div>'
         .. '<div class="tb" data-mud-action="close" title="put the panel away">hide</div>'
         .. '<div class="tb' .. (view == "settings" and " on" or "")
@@ -1965,10 +2063,23 @@ function init()
             view = (view ~= "settings") and "settings" or "list"
         elseif action == "tab" then
             view = tostring(data.data or "list")
-            if view ~= "best" and view ~= "use" then view = "list" end
+            if view ~= "best" and view ~= "use" and view ~= "menu" then
+                view = "list"
+            end
         elseif action == "item" then
             local serial = trim(tostring(data.data or ""))
             if serial ~= "" then view = "item:" .. serial end
+        elseif action == "cmd" then
+            --[[
+                Every menu and item button routes here: the button carries
+                the command text it would have been typed as, and runs the
+                one implementation. A button that drifts from its command
+                is impossible when they are the same call.
+            ]]
+            local text = trim(tostring(data.data or ""))
+            if text ~= "" and type(do_cmd) == "function" then do_cmd(text) end
+            return
+
         elseif action == "ident" then
             local serial = trim(tostring(data.data or ""))
             if serial ~= "" then
@@ -2025,14 +2136,21 @@ function init()
     --[[
         NOT "inv" and not "inventory" — registerCommand eats the MUD's own
         command of the same name, and both belong to the game.
+
+        The body is assigned to do_cmd (declared at file scope) so the panel's
+        buttons run the SAME path as typed commands rather than a parallel
+        implementation that drifts. Assignment, not declaration — a second
+        file-scope local would cost a slot and risk 9b.
     ]]
-    registerCommand("awinv", function(args)
+    do_cmd = function(args)
         local a = args
         if type(a) == "table" then a = table.concat(a, " ") end
         a = trim(tostring(a or ""))
         local low = string.lower(a)
 
         if low == "" or low == "show" then
+            -- also the panel's "back" button, so it must leave a detail view
+            view = "list"
             showWidget(widget)
             pcall(setWidgetAppearance, widget, { zIndex = 9999 })
             render()
@@ -2116,6 +2234,32 @@ function init()
             refresh(false)
             utilprint(TAG .. "rescanning eq, inventory, containers and keyring...")
             showWidget(widget)
+
+        elseif string.sub(low, 1, 3) == "do " then
+            --[[
+                Send a MUD command verbatim and rescan after it. The panel's
+                wear/remove/drop/get buttons come through here: the item
+                table is only true until something moves, so the action and
+                the refresh belong together.
+            ]]
+            local mud = trim(string.sub(a, 3))
+            if mud ~= "" then
+                send(mud)
+                addTimer(600, function() refresh(false) end)
+            end
+
+        elseif string.sub(low, 1, 5) == "scan " then
+            -- index one container by serial, without a whole refresh
+            local serial = trim(string.sub(low, 5))
+            if type(db.items[serial]) ~= "table" then
+                utilprint(TAGR .. "serial " .. serial .. " isn't in the index.")
+            else
+                table.insert(st.scanQ, {
+                    cmd = "invdata " .. serial, where = "c:" .. serial,
+                })
+                next_scan()
+                utilprint(TAG .. "scanning container " .. serial .. "...")
+            end
 
         elseif low == "build" then
             -- dinv's 'build confirm': full scan, then id everything unknown
@@ -2376,7 +2520,10 @@ function init()
             utilprint(TAG .. "state: " .. nEq .. " worn, " .. nInv .. " carried, "
                 .. (cfg.auto and "auto" or "manual") .. " refresh.")
         end
-    end, "inventory, worn, keyring and vault in one searchable panel")
+    end
+
+    registerCommand("awinv", do_cmd,
+        "inventory, worn, keyring and vault in one searchable panel")
 end
 
 function cleanup()
