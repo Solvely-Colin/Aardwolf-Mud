@@ -18,6 +18,7 @@ command names are in brackets. Current: aw-inv 3.1.0.
 | Custom keywords | `keyword` | `keyword add\|rm <word> <query>`, queried as `kw <word>`. |
 | Forget stats | `forget` | `forget <query>`. |
 | Scoring profiles | `priority` (partial) | dinv's seven class defaults + melee/defense. List, switch, edit weights, delete. |
+| Level-banded weights | `priority` blocks | Stored as `name@minlevel`; a flat profile is one band. `max<stat>` cap bonuses and `~slot` bans included. |
 | Item scoring | `score` | Effects flat-weighted from Affect Mods; `all_phys`/3, `all_magic`/17; specificity beats rollup. |
 | Best per slot | `set display` (partial) | Top scorer per wear location at level, correct multi-slot counts, class-matched profile suggestion. |
 | Consumables, portals | `consume` (partial), `portal` | `use <serial>` by type; `go <query>` holds, enters, restores what it displaced. |
@@ -59,7 +60,6 @@ command names are in brackets. Current: aw-inv 3.1.0.
 | Weapon sets | `weapon <types>`, `weapon next` | Damage-type banning, dual-wield pairing (offhand ≤ ½ primary weight, waived for `soldier`), weapon-skill gating from a class/level ability table. |
 | Consumable shops | `consume buy\|small\|big` | Categories with shop rooms and level-sorted items, `mapper goto`, buy N, quaff lowest or highest usable. |
 | Container rules | `organize` | Per-container queries plus a sweep that files matching items automatically. |
-| Level-banded weights | `priority` blocks | dinv's weights vary by level range (sanctuary worth 50 at level 10, 10 by level 100). Ours are flat. |
 | Priority CRUD | `priority create\|clone\|copy\|paste\|compare` | We can list, switch, set weights, delete. No cloning, clipboard sharing, or comparing two priorities' output. |
 
 ### D. Eligibility filters

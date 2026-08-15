@@ -77,7 +77,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "3.1.0",
+    version     = "3.2.0",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -355,6 +355,19 @@ local STAT6 = { "str", "intel", "wis", "dex", "con", "luck" }
 
 -- saved outfits: name -> comma-separated serials that were worn
 local snaps = {}
+
+-- container serial -> a query; anything matching gets filed there by
+-- '/awinv organize'. dinv's inv.organize, minus the sweep-everything
+-- default, because filing worn gear by accident is a bad afternoon.
+local rules = {}
+
+--[[
+    Consumable categories: a name you invent ("heal", "fly") mapped to the
+    shop keyword you buy by. dinv also stored the shop room and bought via
+    the mapper; we keep the naming and the level-aware pick, and leave the
+    running-to-shops to you.
+]]
+local cons = {}
 
 local qol = {
     regen     = "",
@@ -891,6 +904,50 @@ local function load_prof()
             for name, ws in pairs(prof.sets) do
                 if type(ws) == "table" then prof.active = name end
             end
+        end
+    end
+end
+
+local function save_rules()
+    local out = {}
+    for con, q in pairs(rules) do
+        if type(q) == "string" and q ~= "" then
+            table.insert(out, tostring(con) .. "=" .. q)
+        end
+    end
+    saveTable("aw_inv_rules", { blob = table.concat(out, ";") })
+end
+
+local function load_rules()
+    local saved = loadTable("aw_inv_rules")
+    if type(saved) ~= "table" then return end
+    if type(saved.blob) ~= "string" or saved.blob == "" then return end
+    for pair in string.gmatch(saved.blob, "[^;]+") do
+        local eq = pfind(pair, "=")
+        if eq ~= nil and eq > 1 then
+            rules[string.sub(pair, 1, eq - 1)] = string.sub(pair, eq + 1)
+        end
+    end
+end
+
+local function save_cons()
+    local out = {}
+    for name, kw in pairs(cons) do
+        if type(kw) == "string" and kw ~= "" then
+            table.insert(out, tostring(name) .. "=" .. kw)
+        end
+    end
+    saveTable("aw_inv_cons", { blob = table.concat(out, ";") })
+end
+
+local function load_cons()
+    local saved = loadTable("aw_inv_cons")
+    if type(saved) ~= "table" then return end
+    if type(saved.blob) ~= "string" or saved.blob == "" then return end
+    for pair in string.gmatch(saved.blob, "[^;]+") do
+        local eq = pfind(pair, "=")
+        if eq ~= nil and eq > 1 then
+            cons[string.sub(pair, 1, eq - 1)] = string.sub(pair, eq + 1)
         end
     end
 end
@@ -2547,6 +2604,13 @@ local MENU = {
     { g = "Kit",      l = "regen auto",   c = "regen auto",   t = "find a regeneration ring and use it on sleep" },
     { g = "Kit",      l = "regen off",    c = "regen off",    t = "stop swapping a ring in on sleep" },
 
+    { g = "Bags",     l = "filing rules", c = "organize",     t = "which bag takes what" },
+    { g = "Bags",     l = "file it all",  c = "organize run", t = "put carried items in their bags" },
+    { g = "Bags",     l = "ignored",      c = "ignore",       t = "bags left alone" },
+
+    { g = "Kit",      l = "weapons",      c = "weapon",       t = "your weapons ranked, with damage types" },
+    { g = "Kit",      l = "consumables",  c = "consume",      t = "named potion categories" },
+
     { g = "Data",     l = "backup",       c = "backup",       t = "save the item and identify stores" },
     { g = "Data",     l = "restore",      c = "restore",      t = "load the last backup" },
     { g = "Data",     l = "serials",      c = "serials",      t = "show or hide object ids on rows" },
@@ -3101,6 +3165,8 @@ function init()
     load_qol()
     load_sb()
     load_snaps()
+    load_rules()
+    load_cons()
 
     onPluginBroadcast(function(senderId, message, data)
         if tostring(message or "") ~= "aw-font" then return end
@@ -3699,20 +3765,203 @@ function init()
             utilprint(TAG .. "reading your spell bonuses to learn how much room "
                 .. "equipment still has at level " .. char_level() .. "...")
 
+        elseif string.sub(low, 1, 8) == "organize" then
+            --[[
+                Per-bag filing rules. 'organize add <bag> <query>' teaches a
+                container what belongs in it; 'organize' files everything
+                carried according to those rules. Worn gear is left alone —
+                dinv's bare form sweeps that too, and undressing yourself by
+                typing one word is not a feature.
+            ]]
+            local rest = trim(string.sub(a, 9))
+            local restLow = string.lower(rest)
+
+            if string.sub(restLow, 1, 4) == "add " then
+                local body = trim(string.sub(rest, 5))
+                local sp = pfind(body, " ")
+                local con = (sp ~= nil) and string.sub(body, 1, sp - 1) or ""
+                local q = (sp ~= nil) and trim(string.sub(body, sp + 1)) or ""
+                if type(db.items[con]) ~= "table" or q == "" then
+                    utilprint(TAGR .. "usage: /awinv organize add <bag serial> <query>")
+                else
+                    rules[con] = q
+                    save_rules()
+                    utilprint(TAG .. db.items[con].name .. " now takes: " .. q)
+                end
+
+            elseif string.sub(restLow, 1, 6) == "clear " then
+                local con = trim(string.sub(restLow, 7))
+                rules[con] = nil
+                save_rules()
+                utilprint(TAG .. "rule cleared for " .. con .. ".")
+
+            elseif restLow == "" or restLow == "list" then
+                local any = false
+                for con, q in pairs(rules) do
+                    local it = db.items[con]
+                    utilprint("$w  " .. ((type(it) == "table") and it.name or con)
+                        .. " $K(" .. con .. ")$w  <- " .. q)
+                    any = true
+                end
+                if not any then
+                    utilprint(TAG .. "no filing rules yet. "
+                        .. "'/awinv organize add <bag serial> <query>'")
+                    utilprint("$K  e.g. organize add 12345 type potion || type pill$w")
+                else
+                    utilprint("$K  '/awinv organize run' files everything carried.$w")
+                end
+
+            elseif restLow == "run" then
+                local moved = 0
+                for con, q in pairs(rules) do
+                    if type(db.items[con]) == "table" then
+                        for _, serial in ipairs(q_find(q)) do
+                            local it = db.items[serial]
+                            if it.where == "inv" and serial ~= con then
+                                send("put " .. serial .. " " .. con)
+                                moved = moved + 1
+                            end
+                        end
+                    end
+                end
+                utilprint(TAG .. moved .. " item(s) filed.")
+                if moved > 0 then later(1200, function() refresh(false) end) end
+            else
+                utilprint(TAG .. "usage: /awinv organize [list | add <bag> <query> "
+                    .. "| clear <bag> | run]")
+            end
+
+        elseif string.sub(low, 1, 6) == "weapon" then
+            --[[
+                dinv's weapon sets: rank only weapons whose damage type you
+                want, so you can answer "this thing resists slash" without
+                editing a profile. The types are the identify box's own
+                Damage Type words.
+            ]]
+            local want = trim(string.sub(low, 7))
+            local pool = {}
+            for serial, r in pairs(ids.stats) do
+                if type(r) == "table" and slot_of(serial) == "wield"
+                    and usable(serial, char_level()) then
+                    local dt = string.lower(tostring(r.dam_type or ""))
+                    local ok = (want == "" or want == "all")
+                    if not ok and dt ~= "" then
+                        if want == "phys" or want == "physical" then
+                            ok = pfind(dt, "slash") ~= nil or pfind(dt, "pierce") ~= nil
+                                or pfind(dt, "bash") ~= nil
+                        else
+                            ok = pfind(dt, want) ~= nil
+                        end
+                    end
+                    if ok then
+                        local sc = score_of(serial)
+                        table.insert(pool, { serial = serial,
+                            sc = (sc ~= nil) and sc or 0, dt = dt })
+                    end
+                end
+            end
+            table.sort(pool, function(x, y) return x.sc > y.sc end)
+
+            if #pool == 0 then
+                utilprint(TAGR .. "no identified weapon matches '"
+                    .. (want ~= "" and want or "any") .. "'. Damage types come "
+                    .. "from the identify box; without the identify wish many "
+                    .. "weapons never report one.")
+            else
+                utilprint(TAG .. "weapons" .. ((want ~= "") and (" (" .. want .. ")") or "")
+                    .. ", best first:")
+                local i = 1
+                while i <= #pool and i <= 10 do
+                    local e = pool[i]
+                    local it = db.items[e.serial]
+                    utilprint("$w  " .. e.sc .. "pt  $C" .. it.name .. "$w  "
+                        .. ((e.dt ~= "") and ("$K" .. e.dt .. "$w") or "$Kdam type unknown$w"))
+                    i = i + 1
+                end
+                utilprint("$K  '/awinv do wear " .. pool[1].serial
+                    .. "' wields the top one.$w")
+            end
+
+        elseif string.sub(low, 1, 7) == "consume" then
+            local rest = trim(string.sub(a, 8))
+            local restLow = string.lower(rest)
+
+            if string.sub(restLow, 1, 4) == "add " then
+                local body = trim(string.sub(rest, 5))
+                local sp = pfind(body, " ")
+                local nm = (sp ~= nil) and string.lower(string.sub(body, 1, sp - 1)) or ""
+                local kw = (sp ~= nil) and trim(string.sub(body, sp + 1)) or ""
+                if nm == "" or kw == "" then
+                    utilprint(TAGR .. "usage: /awinv consume add <name> <keyword>")
+                else
+                    cons[nm] = kw
+                    save_cons()
+                    utilprint(TAG .. "'" .. nm .. "' means items matching '" .. kw
+                        .. "'. Use with: /awinv consume " .. nm)
+                end
+
+            elseif string.sub(restLow, 1, 3) == "rm " then
+                cons[trim(string.sub(restLow, 4))] = nil
+                save_cons()
+                utilprint(TAG .. "category removed.")
+
+            elseif restLow == "" or restLow == "list" then
+                local any = false
+                for nm, kw in pairs(cons) do
+                    local held = q_find(kw .. " carried")
+                    utilprint("$w  " .. nm .. "  $K" .. kw .. "$w  "
+                        .. #held .. " held")
+                    any = true
+                end
+                if not any then
+                    utilprint(TAG .. "no categories. '/awinv consume add fly griff' "
+                        .. "names a potion you buy, then '/awinv consume fly' drinks "
+                        .. "the best one you can use.")
+                end
+
+            else
+                --[[
+                    Use the highest-level one you can actually use, dinv's
+                    'big'; that is the one worth drinking in a fight.
+                ]]
+                local kw = cons[restLow]
+                if type(kw) ~= "string" then
+                    utilprint(TAGR .. "no category '" .. restLow
+                        .. "'. '/awinv consume list' shows them.")
+                else
+                    local lv, pick, pickLv = char_level(), "", -1
+                    for _, serial in ipairs(q_find(kw)) do
+                        local it = db.items[serial]
+                        if it.where == "inv" or pfind(it.where, "c:") == 1 then
+                            local ilv = it.level
+                            if ilv <= lv and ilv > pickLv then
+                                pick, pickLv = serial, ilv
+                            end
+                        end
+                    end
+                    if pick == "" then
+                        utilprint(TAGR .. "none of your '" .. restLow
+                            .. "' items are usable at level " .. lv .. ".")
+                    else
+                        if type(do_cmd) == "function" then do_cmd("use " .. pick) end
+                    end
+                end
+            end
+
         elseif low == "bags" then
             --[[
                 What the scan believes about containers, and why none were
                 found if none were. A bag lives in inventory or is worn; a
                 scan can only see what invdata/eqdata listed.
             ]]
-            local cons = container_list()
-            utilprint(TAG .. #cons .. " container(s) known.")
-            for _, it in ipairs(cons) do
+            local bagList = container_list()
+            utilprint(TAG .. #bagList .. " container(s) known.")
+            for _, it in ipairs(bagList) do
                 utilprint("$w  " .. it.serial .. "  $C" .. it.name
                     .. "$w  (" .. it.where .. ")  "
                     .. count_where("c:" .. it.serial) .. " item(s) inside")
             end
-            if #cons == 0 then
+            if #bagList == 0 then
                 utilprint("$K  Nothing of type Container was listed by 'invdata' "
                     .. "or 'eqdata'. Bags are found from your main inventory or "
                     .. "worn gear - if yours live somewhere else, run "
@@ -3888,6 +4137,27 @@ function init()
                         render()
                         utilprint(TAG .. name .. "." .. stat .. " = " .. weight .. ".")
                     end
+                end
+
+            elseif string.sub(restLow, 1, 6) == "clone " then
+                -- the deep dive's day-one advice: start from a class default
+                local body = trim(string.sub(restLow, 7))
+                local sp = pfind(body, " ")
+                local src = (sp ~= nil) and string.sub(body, 1, sp - 1) or ""
+                local dst = (sp ~= nil) and trim(string.sub(body, sp + 1)) or ""
+                dst = string.gsub(dst, "[^a-z0-9_-]", "")
+                if type(prof.sets[src]) ~= "table" or dst == "" then
+                    utilprint(TAGR .. "usage: /awinv prio clone <from> <to>")
+                else
+                    local copy = {}
+                    for k, v in pairs(prof.sets[src]) do copy[k] = v end
+                    prof.sets[dst] = copy
+                    prof.active = dst
+                    save_prof()
+                    render()
+                    utilprint(TAG .. "'" .. dst .. "' cloned from " .. src
+                        .. " and made active. Tune it with "
+                        .. "'/awinv prio set " .. dst .. " <stat> <weight>'.")
                 end
 
             elseif string.sub(restLow, 1, 4) == "del " then
@@ -4106,6 +4376,12 @@ function init()
             utilprint("$w  /awinv compare <item>      is this item worth keeping")
             utilprint("$w  /awinv store <query>       put things back in their bags")
             utilprint("$w  /awinv ignore on|off <serial>      leave a bag alone")
+            utilprint("$w  /awinv organize add <bag> <query>  teach a bag what it takes")
+            utilprint("$w  /awinv organize run        file everything carried")
+            utilprint("$w  /awinv weapon [type]       weapons ranked by damage type")
+            utilprint("$w  /awinv consume add <name> <keyword>   name a potion you buy")
+            utilprint("$w  /awinv consume <name>      drink the best one you can use")
+            utilprint("$w  /awinv prio clone <from> <to>      start from a class default")
             utilprint("$w  /awinv use [serial]        consumables/portals view, or use one")
             utilprint("$w  /awinv go <serial>         hold a portal and enter it")
             utilprint("$w  /awinv score <serial>      score one item")
