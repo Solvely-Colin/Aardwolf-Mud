@@ -77,7 +77,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "3.2.0",
+    version     = "3.2.1",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -154,7 +154,7 @@ local st = {
     inBlock  = "",
     inId     = "",       -- kept for state compatibility; unused by scans
     mine     = false,    -- current scan is one we requested
-    buf      = {},       -- serials seen in the current scan
+    buf      = {},       -- set of serials this scan reported, for reconciling
     conQueue = {},       -- kept for debug display; containers ride scanQ
     blockTimer = nil,
     pokeTimer  = nil,    -- invmon debounce
@@ -637,6 +637,7 @@ local function parse_row(line, where)
         where  = where,
     }
     db.items[serial] = it
+    st.buf[serial] = true
     st.nParsed = st.nParsed + 1
     return true
 end
@@ -660,7 +661,11 @@ end
 -- a string round-trips exactly.
 ---
 
-local function save_db()
+--[[
+    Write the item table out. The guarded save_db below is what callers use;
+    this one is for the two paths that empty it deliberately.
+]]
+local function save_db_force()
     local rows = {}
     for _, it in pairs(db.items) do
         if type(it) == "table" then
@@ -677,6 +682,29 @@ local function save_db()
         hv   = db.haveVault and 1 or 0,
         hk   = db.haveKey and 1 or 0,
     })
+end
+
+--[[
+    Refuse to replace a populated store with an empty one. Every legitimate
+    way to empty the table saves through save_db_force, so an empty save
+    arriving here is a symptom — a scan that answered nothing, a disconnect
+    mid-refresh — and overwriting on it is how a session's work disappears.
+]]
+local function save_db()
+    local n = 0
+    for _, it in pairs(db.items) do
+        if type(it) == "table" then n = n + 1 end
+    end
+    if n == 0 then
+        local had = loadTable("aw_inv_items")
+        if type(had) == "table" and type(had.blob) == "string" and had.blob ~= "" then
+            utilprint(TAGR .. "not saving an empty inventory over the stored "
+                .. "one. '/awinv refresh' to rebuild, '/awinv clear' to really "
+                .. "discard it.")
+            return
+        end
+    end
+    save_db_force()
 end
 
 local function load_db()
@@ -2887,7 +2915,26 @@ local function scan_end()
     if st.inBlock == "" then return end
     local wasInv = (st.inBlock == "inv")
     local wasCon = (pfind(st.inBlock, "c:") == 1)
+    local where  = st.inBlock
+    local seen   = st.buf
+    local rows   = st.scanRows
     block_release()
+
+    --[[
+        Reconcile: anything previously filed here that this scan did NOT
+        report has moved or gone. Skipped when the scan produced nothing,
+        because "no answer" and "nothing there" are not the same thing and
+        only one of them should empty your inventory.
+    ]]
+    if rows > 0 then
+        local goners = {}
+        for serial, it in pairs(db.items) do
+            if type(it) == "table" and it.where == where and seen[serial] ~= true then
+                table.insert(goners, serial)
+            end
+        end
+        for _, serial in ipairs(goners) do db.items[serial] = nil end
+    end
 
     --[[
         Queue a scan for every container we now know about and haven't
@@ -2962,8 +3009,16 @@ next_scan = function()
     if st.inBlock ~= "" then return end
     if #st.scanQ == 0 then return end
 
+    --[[
+        NOT cleared here. Clearing a location before the reply arrives means
+        a scan that answers with nothing deletes it — and scan_end saves, so
+        the loss is permanent. That is exactly what a login does: an invmon
+        burst fires a refresh while the character is still settling, the
+        scans answer empty, and the table is wiped and persisted over.
+        Stale entries are pruned at scan_end instead, and only when the scan
+        actually produced rows.
+    ]]
     local s = table.remove(st.scanQ, 1)
-    clear_where(s.where)
     st.inBlock  = s.where
     st.mine     = true
     st.buf      = {}
@@ -3167,6 +3222,23 @@ function init()
     load_snaps()
     load_rules()
     load_cons()
+
+    --[[
+        Say what came back. Persistence failing silently is how a session's
+        work disappears unnoticed; a line at startup makes it obvious the
+        moment it stops working.
+    ]]
+    local nLoad, nIdLoad = 0, 0
+    for _, it in pairs(db.items) do
+        if type(it) == "table" then nLoad = nLoad + 1 end
+    end
+    for _, r in pairs(ids.stats) do
+        if type(r) == "table" then nIdLoad = nIdLoad + 1 end
+    end
+    if nLoad > 0 then
+        utilprint(TAG .. "restored " .. nLoad .. " item(s), " .. nIdLoad
+            .. " identified.")
+    end
 
     onPluginBroadcast(function(senderId, message, data)
         if tostring(message or "") ~= "aw-font" then return end
@@ -4007,7 +4079,7 @@ function init()
             db.items = {}
             db.haveKey = false
             db.haveVault = false
-            save_db()
+            save_db_force()
             render()
             utilprint(TAG .. "table cleared.")
 
