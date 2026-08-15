@@ -77,7 +77,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "2.4.4",
+    version     = "2.5.0",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -1412,8 +1412,17 @@ local function best_set(level)
             local lv = tonumber(r.level)
             if lv == nil then lv = 0 end
             if slot ~= "" and lv <= level then
+                --[[
+                    Zero-scoring items belong here too. dinv's set builder
+                    takes any eligible item and keeps the highest score,
+                    zero included — excluding them left a character's
+                    rings, boots, neck and WEAPON off the list entirely
+                    whenever the active profile happened not to weight
+                    what those pieces carry. "Nothing better exists" is an
+                    answer; a missing slot is not.
+                ]]
                 local sc = score_of(serial)
-                if sc ~= nil and sc > 0 then
+                if sc ~= nil then
                     if type(per[slot]) ~= "table" then per[slot] = {} end
                     table.insert(per[slot], { serial = serial, sc = sc })
                 end
@@ -1887,8 +1896,37 @@ local function render_best()
             .. '<span class="lv">' .. e.sc .. "pt</span></div>")
     end
 
+    --[[
+        Suggest the profile that matches the character. The class comes
+        from GMCP as a subclass name most of the time (Elementalist, not
+        Mage), so map the ones Aardwolf ships back to their primary.
+    ]]
+    local SUBCLASS = {
+        elementalist = "mage", necromancer = "mage", wizard = "mage",
+        priest = "cleric", druid = "cleric", monk = "cleric",
+        soldier = "warrior", blacksmith = "warrior", gladiator = "warrior",
+        assassin = "thief", bandit = "thief", navigator = "thief",
+        huntsman = "ranger", scavenger = "ranger", herbalist = "ranger",
+        avenger = "paladin", crusader = "paladin", templar = "paladin",
+        mentalist = "psi", psionicist = "psi", spiritualist = "psi",
+    }
+    local cls = string.lower(trim(tostring(
+        gfield(getGMCPData("char.base"), "subclass")
+        or gfield(getGMCPData("char.base"), "class") or "")))
+    local want = SUBCLASS[cls]
+    if want == nil and prof.sets[cls] ~= nil then want = cls end
+
+    local tip = ""
+    if want ~= nil and want ~= prof.active then
+        tip = " You are a " .. esc(cls) .. ", so <b>" .. want
+            .. "</b> likely suits you better &#8212; "
+            .. '<span class="tb" data-mud-action="cmd" data-mud-data="prio use '
+            .. want .. '">switch to ' .. want .. "</span>"
+    end
+
     table.insert(out, '<div class="note">Scores are the active profile\'s weighted '
-        .. "sums &#8212; <code>/awinv prio</code> to inspect or change weights.</div>")
+        .. "sums &#8212; <code>/awinv prio</code> to inspect or change weights."
+        .. tip .. "</div>")
     return table.concat(out, "\n")
 end
 
