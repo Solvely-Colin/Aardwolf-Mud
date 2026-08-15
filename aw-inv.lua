@@ -77,7 +77,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "3.0.0",
+    version     = "3.1.0",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -168,6 +168,28 @@ local st = {
     scanRows = 0,        -- rows this scan has produced; gates the prompt-close
     scanSeq = 0,         -- scan token, so a grace timer can't close a later scan
 }
+
+-- every trigger id this plugin registers, so cleanup can release them.
+-- A stranded catch-all with omitFromOutput swallows the whole session.
+local trigs = {}
+
+local function trig(pattern, fn, opts)
+    local id = addTrigger(pattern, fn, opts)
+    table.insert(trigs, id)
+    return id
+end
+
+--[[
+    A delayed call that survives a disconnect. addTimer refuses while the
+    session is down — it returns "" and never fires — so anything that must
+    run at the login prompt or across a reconnect goes through setTimeout,
+    which does not care. Falls back to addTimer if this build lacks it.
+]]
+local function later(ms, fn)
+    local ok, id = pcall(function() return setTimeout(fn, ms) end)
+    if ok and id ~= nil and id ~= "" then return id end
+    return addTimer(ms, fn)
+end
 
 local widget  = nil
 local view    = "list"   -- list | best | use | settings | item:<serial>
@@ -397,11 +419,14 @@ local function rawfind_first(s, needle)
     local q = string.find(s, needle, 1, true)
     if q == nil then return nil end
     if type(q) == "number" then return q end
-    local v = q[0]
-    if v == nil then v = q["0"] end
-    if v == nil then v = q[1] end
-    if v == nil then v = q["1"] end
-    return tonumber(v)
+    -- tonumber at each step: `v == nil` is false for undefined, so the
+    -- string-key fallbacks below never ran. This is the most load-bearing
+    -- helper in the file; if it returns nil, every parser stops.
+    local v = tonumber(q[0])
+    if v == nil then v = tonumber(q["0"]) end
+    if v == nil then v = tonumber(q[1]) end
+    if v == nil then v = tonumber(q["1"]) end
+    return v
 end
 
 local FIND_ADJ = 0
@@ -472,7 +497,17 @@ end
 ]]
 local function gfield(t, name)
     if type(t) ~= "table" then return nil end
-    if t[name] ~= nil then return t[name] end
+    --[[
+        `t[name] ~= nil` looks like the obvious guard and is the bug: a key
+        dot access cannot reach reads as `undefined`, and `undefined == nil`
+        is FALSE here, so it returned undefined and the pairs walk below —
+        the entire point of this helper — was dead code. Test the TYPE.
+    ]]
+    local direct = t[name]
+    if type(direct) == "string" or type(direct) == "number"
+        or type(direct) == "boolean" or type(direct) == "table" then
+        return direct
+    end
     for k, v in pairs(t) do
         if tostring(k) == name then return v end
     end
@@ -910,12 +945,16 @@ local function q_field(serial, key)
         return sc
     end
     if key == "slot" or key == "wearloc" then return slot_of(serial) end
-    if key == "kw" or key == "tag" then return tostring(r.tags or "") end
+    if key == "kw" or key == "tag" then
+        local tg = r.tags
+        if type(tg) ~= "string" then return "" end
+        return tg
+    end
 
     -- identify fields and stat mods share the record, so one lookup covers
     -- wearable/material/worth/weight/damtype/... and str/int/hit/dam/...
     local v = r[key]
-    if v ~= nil then return v end
+    if type(v) == "string" or type(v) == "number" then return v end
 
     -- a few spellings the box uses that a player would not type
     if key == "damtype" then return r.dam_type end
@@ -1058,7 +1097,7 @@ local function id_mods(text)
     -- the shipping aw-loot pattern, classes and all — measured working
     for label, sign, digits in string.gmatch(text, "([A-Za-z][A-Za-z ]-)%s*:%s*([%+%-])(%d+)") do
         local col = STAT_MAP[trim(label)]
-        if col ~= nil and type(ids.rec) == "table" then
+        if type(col) == "string" and type(ids.rec) == "table" then
             ids.rec[col] = tonumber(sign .. digits)
         end
     end
@@ -1122,11 +1161,11 @@ local function id_line(body)
     local keep = function(label, value)
         value = trim(value)
         -- the box's right border rides along on the last value of a row
-        while string.sub(value, -1) == "|" do
+        while #value > 0 and string.sub(value, #value, #value) == "|" do
             value = trim(string.sub(value, 1, #value - 1))
         end
         local key = ID_FIELDS[trim(label)]
-        if key ~= nil and value ~= "" then
+        if type(key) == "string" and value ~= "" then
             if key == "level" or key == "worth" or key == "weight"
                 or key == "score" or key == "ave_dam" or key == "capacity" then
                 ids.rec[key] = numc(value)
@@ -1220,7 +1259,7 @@ local function id_store()
     end
 
     if ids.timer ~= nil then pcall(removeTimer, ids.timer) end
-    ids.timer = addTimer(700, function()
+    ids.timer = later(700, function()
         ids.timer = nil
         if type(id_next) == "function" then id_next() end
     end)
@@ -1275,7 +1314,7 @@ id_next = function()
     send("id " .. serial)
 
     id_guard_off()
-    ids.guard = addTimer(8000, function()
+    ids.guard = later(8000, function()
         ids.guard = nil
         if ids.pending == serial and type(ids.rec) ~= "table" then
             utilprint(TAGR .. "no id box for " .. serial .. " - skipped.")
@@ -1321,7 +1360,8 @@ local function id_queue(which)
             local known = type(ids.stats[serial]) == "table"
             local nm = string.lower(it.name)
 
-            if FUNGIBLE[it.itype] == true and which ~= "all" and seenName[nm] then
+            if FUNGIBLE[it.itype] == true and which ~= "all"
+                and seenName[nm] == true then
                 known = true          -- one of these is every one of these
             end
 
@@ -1566,14 +1606,18 @@ local function score_at(serial, level)
     if wp ~= nil and wp > 0 then
         for _, k in ipairs(PHYS_RES) do
             local v = tonumber(r[k])
-            if v ~= nil and ws[k] == nil then total = total + wp * v / 3 end
+            if v ~= nil and tonumber(ws[k]) == nil then
+                total = total + wp * v / 3
+            end
         end
     end
     local wm = tonumber(ws.all_magic)
     if wm ~= nil and wm > 0 then
         for _, k in ipairs(MAG_RES) do
             local v = tonumber(r[k])
-            if v ~= nil and ws[k] == nil then total = total + wm * v / 17 end
+            if v ~= nil and tonumber(ws[k]) == nil then
+                total = total + wm * v / 17
+            end
         end
     end
 
@@ -1598,8 +1642,13 @@ end
 local function slot_of(serial)
     local r = ids.stats[serial]
     if type(r) ~= "table" then return "" end
-    local wearable = string.lower(trim(tostring(r.wearable or "")))
-    if wearable == "" then return "" end
+    -- `r.wearable or ""` never fires on undefined, and undefined reaches a
+    -- string field as the TEXT "undefined" — so unwearable things claimed a
+    -- slot of that name and crowded the rankings.
+    local raw = r.wearable
+    if type(raw) ~= "string" then return "" end
+    local wearable = string.lower(trim(raw))
+    if wearable == "" or wearable == "undefined" then return "" end
     -- first word: "wield (weapon)" and friends carry trailing commentary
     local p = pfind(wearable, " ")
     if p ~= nil then wearable = string.sub(wearable, 1, p - 1) end
@@ -1703,8 +1752,10 @@ local function best_set(level)
 
     local out = {}
     for _, slot in ipairs(slots) do
-        local cap = SLOT_CAP[slot]
-        if cap == nil then cap = 1 end
+        -- an unlisted slot reads undefined, `cap == nil` is false, and
+        -- `1 <= undefined` is false, so the slot silently disappeared
+        local cap = tonumber(SLOT_CAP[slot])
+        if cap == nil or cap < 1 then cap = 1 end
         local list = per[slot]
         local i = 1
         while i <= cap and i <= #list do
@@ -1778,7 +1829,7 @@ local function ana_step()
     if ana.at % 50 < ana.step then
         utilprint("$K  ...level " .. ana.at .. "$w")
     end
-    addTimer(60, ana_step)
+    later(60, ana_step)
 end
 
 local function ana_start(step)
@@ -2371,9 +2422,12 @@ local function render_best()
         for _, r in pairs(ids.stats) do
             if type(r) == "table" then nId = nId + 1 end
         end
-        local nSlot = 0
+        local nSlot, nOk = 0, 0
         for s2, r2 in pairs(ids.stats) do
-            if type(r2) == "table" and slot_of(s2) ~= "" then nSlot = nSlot + 1 end
+            if type(r2) == "table" and slot_of(s2) ~= "" then
+                nSlot = nSlot + 1
+                if usable(s2, level) then nOk = nOk + 1 end
+            end
         end
 
         local why = ""
@@ -2382,6 +2436,10 @@ local function render_best()
         elseif nSlot == 0 then
             why = nId .. " item(s) identified, but none of them report a "
                 .. "wearable slot, so there is nothing to rank per location."
+        elseif nOk == 0 then
+            why = nSlot .. " wearable item(s) identified, but none are usable "
+                .. "at level " .. level .. " &#8212; too high a level, hero-only, "
+                .. "alignment-restricted, or in an ignored bag."
         else
             why = nSlot .. " wearable item(s) identified, but none score above "
                 .. "zero under <b>" .. esc(prof.active) .. "</b>. Try another "
@@ -2420,10 +2478,13 @@ local function render_best()
         gfield(getGMCPData("char.base"), "subclass")
         or gfield(getGMCPData("char.base"), "class") or "")))
     local want = SUBCLASS[cls]
-    if want == nil and prof.sets[cls] ~= nil then want = cls end
+    if type(want) ~= "string" and type(prof.sets[cls]) == "table" then
+        want = cls
+    end
 
     local tip = ""
-    if want ~= nil and want ~= prof.active then
+    if type(want) == "string" and want ~= "" and want ~= prof.active
+        and type(prof.sets[want]) == "table" then
         tip = " You are a " .. esc(cls) .. ", so <b>" .. want
             .. "</b> likely suits you better &#8212; "
             .. '<span class="tb" data-mud-action="cmd" data-mud-data="prio use '
@@ -2828,7 +2889,7 @@ local function scan_end()
         end
     end
 
-    addTimer(250, function()
+    later(250, function()
         if type(next_scan) == "function" then next_scan() end
     end)
 end
@@ -2859,14 +2920,14 @@ next_scan = function()
         result closes on this grace timer instead; the long timer stays
         as the catch-all.
     ]]
-    addTimer(2500, function()
+    later(2500, function()
         if st.scanSeq == mySeq and st.inBlock ~= "" and st.scanRows == 0 then
             scan_end()
         end
     end)
 
     if st.blockTimer ~= nil then pcall(removeTimer, st.blockTimer) end
-    st.blockTimer = addTimer(BLOCK_MS, function()
+    st.blockTimer = later(BLOCK_MS, function()
         if st.inBlock ~= "" then scan_end() end
     end)
 end
@@ -2952,10 +3013,6 @@ local function on_invmon(c, line, w)
         flight, action 1 (Removed) names the item the ring displaced — dinv
         tracked the slot; the event is simpler and arrives anyway.
     ]]
-    -- the id pass removes and re-wears gear, which fires invmon endlessly;
-    -- auto-refreshing off our own churn would interleave scans into open
-    -- id boxes
-    if ids.pending ~= "" or #ids.q > 0 then return end
     if qol.watchWear == true then
         local plain = tostring(line or "")
         local payload = ""
@@ -2971,9 +3028,17 @@ local function on_invmon(c, line, w)
 
     if cfg.auto ~= true then return end
 
+    --[[
+        Sits BELOW the regen capture on purpose. The id pass removes and
+        re-wears gear constantly, so auto-refreshing off our own churn would
+        interleave scans into open identify boxes — but a sleep during a
+        pass must still record what the ring displaced.
+    ]]
+    if ids.pending ~= "" or #ids.q > 0 then return end
+
     st.clockMs = st.clockMs + DEBOUNCE_MS
     if st.pokeTimer ~= nil then pcall(removeTimer, st.pokeTimer) end
-    st.pokeTimer = addTimer(DEBOUNCE_MS, function()
+    st.pokeTimer = later(DEBOUNCE_MS, function()
         st.pokeTimer = nil
         if st.clockMs - st.lastAuto >= MIN_AUTO_MS then
             st.lastAuto = st.clockMs
@@ -3034,6 +3099,8 @@ function init()
     load_stats()
     load_prof()
     load_qol()
+    load_sb()
+    load_snaps()
 
     onPluginBroadcast(function(senderId, message, data)
         if tostring(message or "") ~= "aw-font" then return end
@@ -3068,17 +3135,17 @@ function init()
         alternation never matched at all, and a priority-70 trigger without
         keepEvaluating never saw a line the priority-90 gag had discarded.
     ]]
-    addTrigger("^\\{eqdata\\}", on_open_marker, { type = "regex", keepEvaluating = true })
-    addTrigger("^\\{invdata\\}", on_open_marker, { type = "regex", keepEvaluating = true })
-    addTrigger("^\\{keyring\\}", on_open_marker, { type = "regex", keepEvaluating = true })
-    addTrigger("^\\{vault\\}", on_open_marker, { type = "regex", keepEvaluating = true })
-    addTrigger("^\\{/(?:invdata|eqdata|keyring|vault)\\}", on_close,
+    trig("^\\{eqdata\\}", on_open_marker, { type = "regex", keepEvaluating = true })
+    trig("^\\{invdata\\}", on_open_marker, { type = "regex", keepEvaluating = true })
+    trig("^\\{keyring\\}", on_open_marker, { type = "regex", keepEvaluating = true })
+    trig("^\\{vault\\}", on_open_marker, { type = "regex", keepEvaluating = true })
+    trig("^\\{/(?:invdata|eqdata|keyring|vault)\\}", on_close,
         { type = "regex", keepEvaluating = true })
-    addTrigger("^\\{vaultcounts\\}([0-9]+),([0-9]+),([0-9]+)", on_vaultcounts,
+    trig("^\\{vaultcounts\\}([0-9]+),([0-9]+),([0-9]+)", on_vaultcounts,
         { type = "regex", keepEvaluating = true })
-    addTrigger("^\\{invmon\\}", on_invmon,
+    trig("^\\{invmon\\}", on_invmon,
         { type = "regex", keepEvaluating = true })
-    addTrigger("^You dream about (?:being able to keyring|checking your vault)\\.$",
+    trig("^You dream about (?:being able to keyring|checking your vault)\\.$",
         on_dream, { type = "regex", keepEvaluating = true })
 
     --[[
@@ -3096,7 +3163,15 @@ function init()
     table.insert(ids.trigs, addTrigger("^[^|+].*$", on_id_close,
         { type = "regex", keepEvaluating = true, enabled = false }))
 
-    addTrigger("^You wake and stand up\\.$", on_wake,
+    trig("^You wake and stand up\\.$", on_wake,
+        { type = "regex", keepEvaluating = true })
+
+    --[[
+        The 'stats' command's spell-bonus row, which sets the ceilings all
+        scoring is judged against. Without this registered, /awinv stats
+        sent the command and threw the answer away.
+    ]]
+    trig("^Spells Bonus", on_spells_bonus,
         { type = "regex", keepEvaluating = true })
 
     drop_handlers(widget, "action")
@@ -3169,17 +3244,23 @@ function init()
         item, and waking re-wears it. With no ring set, sleep passes through
         untouched.
     ]]
-    registerCommand("sleep", function()
+    registerCommand("sleep", function(args)
+        -- the client eats the whole first word, so 'sleep bed' arrives here
+        -- with 'bed' in args and must be forwarded or the couch is lost
+        local rest = args
+        if type(rest) == "table" then rest = table.concat(rest, " ") end
+        rest = trim(tostring(rest or ""))
+
         if qol.regen ~= "" and type(db.items[qol.regen]) == "table" then
             qol.watchWear = true
             if qol.watchTimer ~= nil then pcall(removeTimer, qol.watchTimer) end
-            qol.watchTimer = addTimer(4000, function()
+            qol.watchTimer = later(4000, function()
                 qol.watchTimer = nil
                 qol.watchWear = false
             end)
             send("wear " .. qol.regen)
         end
-        send("sleep")
+        send(trim("sleep " .. rest))
     end, "sleep, wearing the regen ring first if one is set (/awinv regen)")
 
     --[[
@@ -3313,7 +3394,7 @@ function init()
                 end
             end
             utilprint(TAG .. n .. " item(s) moved to inventory.")
-            if n > 0 then addTimer(900, function() refresh(false) end) end
+            if n > 0 then later(900, function() refresh(false) end) end
 
         elseif string.sub(low, 1, 4) == "put " then
             --[[
@@ -3336,7 +3417,7 @@ function init()
                     end
                 end
                 utilprint(TAG .. n .. " item(s) into " .. db.items[con].name .. ".")
-                if n > 0 then addTimer(900, function() refresh(false) end) end
+                if n > 0 then later(900, function() refresh(false) end) end
             end
 
         elseif string.sub(low, 1, 8) == "keyword " then
@@ -3362,7 +3443,8 @@ function init()
                 local n = 0
                 for _, serial in ipairs(q_find(q)) do
                     if type(ids.stats[serial]) ~= "table" then ids.stats[serial] = {} end
-                    local cur = tostring(ids.stats[serial].tags or "")
+                    local cur = ids.stats[serial].tags
+                    if type(cur) ~= "string" then cur = "" end
                     local has = pfind(" " .. cur .. " ", " " .. word .. " ") ~= nil
                     if op == "add" and not has then
                         ids.stats[serial].tags = trim(cur .. " " .. word)
@@ -3401,7 +3483,7 @@ function init()
             local mud = trim(string.sub(a, 3))
             if mud ~= "" then
                 send(mud)
-                addTimer(600, function() refresh(false) end)
+                later(600, function() refresh(false) end)
             end
 
         elseif low == "wear" or string.sub(low, 1, 5) == "wear " then
@@ -3423,7 +3505,7 @@ function init()
                 else
                     utilprint(TAG .. "wearing the " .. prof.active .. " set for level "
                         .. lv .. ": " .. nOn .. " on, " .. nOff .. " off.")
-                    addTimer(1500, function() refresh(false) end)
+                    later(1500, function() refresh(false) end)
                 end
             end
 
@@ -3444,7 +3526,7 @@ function init()
                 local nOff, nOn = wear_rows(rows)
                 utilprint(TAG .. "wearing outfit '" .. nm .. "': " .. nOn
                     .. " on, " .. nOff .. " off.")
-                if nOn > 0 then addTimer(1500, function() refresh(false) end) end
+                if nOn > 0 then later(1500, function() refresh(false) end) end
             elseif op == "del" and nm ~= "" then
                 snaps[nm] = nil
                 save_snaps()
@@ -3483,7 +3565,7 @@ function init()
                 end
             end
             utilprint(TAG .. n .. " item(s) returned to their bags.")
-            if n > 0 then addTimer(1200, function() refresh(false) end) end
+            if n > 0 then later(1200, function() refresh(false) end) end
 
         elseif string.sub(low, 1, 6) == "ignore" then
             local rest = trim(string.sub(low, 7))
@@ -3768,10 +3850,29 @@ function init()
                     local name = string.sub(tail, 1, p2 - 1)
                     local stat = string.sub(rest2, 1, p3 - 1)
                     local weight = tonumber(trim(string.sub(rest2, p3 + 1)))
+                    --[[
+                        Accept everything score_at can actually read: the
+                        stat mods, the effect names it looks up via aff_,
+                        the derived weapon/pool keys, the max<stat> cap
+                        bonuses and the ~<slot> bans. The old check allowed
+                        only STAT_MAP values, so weights visible in
+                        'prio list' could not be edited.
+                    ]]
                     local known = false
                     for _, v in pairs(STAT_MAP) do
                         if v == stat then known = true end
                     end
+                    for _, v in ipairs({ "ave_dam", "offhand_dam", "score",
+                        "weight", "worth", "sanctuary", "haste", "flying",
+                        "invis", "regeneration", "detectinvis", "detecthidden",
+                        "detectevil", "detectgood", "detectmagic", "dualwield",
+                        "irongrip", "shield" }) do
+                        if v == stat then known = true end
+                    end
+                    for _, v in ipairs(STAT6) do
+                        if stat == "max" .. v then known = true end
+                    end
+                    if string.sub(stat, 1, 1) == "~" then known = true end
                     if weight == nil or not known then
                         utilprint(TAGR .. "stats are the id-box keys: str, intel, wis, "
                             .. "dex, con, luck, hp, mana, moves, hit, dam, all_phys, "
@@ -3853,10 +3954,10 @@ function init()
                 send("enter")
                 utilprint(TAG .. "entering " .. it.name .. "...")
 
-                addTimer(1200, function()
+                later(1200, function()
                     if home ~= "" then send("put " .. serial .. " " .. home) end
                     if held ~= "" then send("wear " .. held) end
-                    addTimer(600, function() refresh(false) end)
+                    later(600, function() refresh(false) end)
                 end)
             end
 
@@ -3885,7 +3986,7 @@ function init()
                 if pfind(it.where, "c:") == 1 then home = string.sub(it.where, 3) end
                 if home ~= "" then send("get " .. serial .. " " .. home) end
                 utilprint(TAG .. it.name .. " in hand for " .. secs .. "s.")
-                addTimer(secs * 1000, function()
+                later(secs * 1000, function()
                     if home ~= "" then
                         send("put " .. serial .. " " .. home)
                     end
@@ -4028,6 +4129,18 @@ function init()
 end
 
 function cleanup()
+    --[[
+        Release everything init() created. The client tidies widgets and
+        timers, but a trigger left behind keeps firing into a dead plugin,
+        and a re-enable then registers a second copy of each.
+    ]]
+    for _, id in ipairs(trigs) do pcall(removeTrigger, id) end
+    trigs = {}
+    for _, id in ipairs(ids.trigs) do pcall(removeTrigger, id) end
+    ids.trigs = {}
+    pcall(drop_handlers, widget, "action")
+    pcall(drop_handlers, widget, "submit")
+
     if rowTrig ~= nil then pcall(removeTrigger, rowTrig); rowTrig = nil end
     if st.blockTimer ~= nil then pcall(removeTimer, st.blockTimer); st.blockTimer = nil end
     if st.pokeTimer ~= nil then pcall(removeTimer, st.pokeTimer); st.pokeTimer = nil end
