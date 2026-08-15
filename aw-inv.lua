@@ -77,7 +77,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "2.4.3",
+    version     = "2.4.4",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -1072,22 +1072,51 @@ local function id_line(body)
         return
     end
 
-    -- plain "Label : value" pairs, two to a row, split on column padding
+    --[[
+        Plain "Label : value" pairs, up to two per row.
+
+        The box PADS its labels — "Wearable    : finger" — so splitting on
+        column padding puts the label in one chunk and ": finger" in the
+        next. Requiring the colon to sit inside a chunk therefore threw
+        away every padded field, which is every field that matters: 94
+        items identified and not one reported a wearable slot.
+
+        So a chunk beginning with a colon is the value belonging to the
+        chunk before it, and a label with no colon yet is held until one
+        arrives. Both layouts fall out of the same walk.
+    ]]
+    local pending = ""
+
+    local keep = function(label, value)
+        value = trim(value)
+        -- the box's right border rides along on the last value of a row
+        while string.sub(value, -1) == "|" do
+            value = trim(string.sub(value, 1, #value - 1))
+        end
+        local key = ID_FIELDS[trim(label)]
+        if key ~= nil and value ~= "" then
+            if key == "level" or key == "worth" or key == "weight"
+                or key == "score" or key == "ave_dam" or key == "capacity" then
+                ids.rec[key] = numc(value)
+            else
+                ids.rec[key] = decode(value)
+            end
+            ids.modBlock = ""
+        end
+    end
+
     for _, chunk in ipairs(split_cols(body)) do
         local c = pfind(chunk, ":")
-        if c ~= nil and c > 1 then
-            local label = trim(string.sub(chunk, 1, c - 1))
-            local value = trim(string.sub(chunk, c + 1))
-            local key = ID_FIELDS[label]
-            if key ~= nil and value ~= "" then
-                if key == "level" or key == "worth" or key == "weight"
-                    or key == "score" or key == "ave_dam" or key == "capacity" then
-                    ids.rec[key] = numc(value)
-                else
-                    ids.rec[key] = decode(value)
-                end
-                ids.modBlock = ""
+        if c == 1 then
+            if pending ~= "" then
+                keep(pending, string.sub(chunk, 2))
+                pending = ""
             end
+        elseif c ~= nil and c > 1 then
+            keep(string.sub(chunk, 1, c - 1), string.sub(chunk, c + 1))
+            pending = ""
+        else
+            pending = trim(chunk)
         end
     end
 end
