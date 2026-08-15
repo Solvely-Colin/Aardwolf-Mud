@@ -2,7 +2,7 @@
 
 Measured against Durel's original (18,804 lines) from a full four-part read of
 its command surface, item engine, scoring engine and QoL modules. dinv's own
-command names are in brackets. Current: aw-inv 2.5.0.
+command names are in brackets. Current: aw-inv 3.1.0.
 
 ---
 
@@ -30,27 +30,27 @@ command names are in brackets. Current: aw-inv 2.5.0.
 
 ## Missing
 
-### A. Small — a session each
+### A. Small
 
-| Feature | dinv | What it needs |
+| Feature | dinv | Status |
 |---|---|---|
-| Wear a computed set | `set wear` | Conflict eviction (shield vs second vs hold; offhand weight ≤ ½ primary) and ordered store-then-wear — hands first, so Gloves of Dexterity grant dual wield before weapons go on. |
-| Saved outfits | `snapshot` | Capture worn `{slot → serial}`, restore it. Nearly free once `set wear` exists — dinv reuses the same wear pipeline. |
-| Ignored containers | `ignore` | A flag per container, honoured by scan, search, get/put and set building. |
-| Return items home | `store` | Needs per-item "home container" — the bag it was last taken from. We see the `{invmon}` events that carry it; we just don't record them. |
-| Auto-refresh interval | `refresh on\|off\|eager <min>` | We have on/off only, no period and no eager mode. |
-| Verbosity | `notify` | none / light / standard / all. |
-| Report to channel | `report <chan> item\|set` | Format an item or set summary and send it. |
+| Wear a computed set | `set wear` | **Done** &mdash; `/awinv wear`, hands before weapons, displaced items off first. |
+| Saved outfits | `snapshot` | **Done** &mdash; `/awinv snap save\|wear\|del`. |
+| Ignored containers | `ignore` | **Done** &mdash; `/awinv ignore on\|off\|list`, honoured by ranking and search. |
+| Return items home | `store` | **Done** &mdash; `/awinv store <query>`, using the bag an item was last found in. |
+| Auto-refresh interval | `refresh on\|off\|eager <min>` | On/off only; no period or eager mode. |
+| Verbosity | `notify` | Not ported. |
+| Report to channel | `report <chan> item\|set` | Not ported. |
 
-### B. The analysis stack — the big one, in dependency order
+### B. The analysis stack
 
-| Feature | dinv | What it needs |
+| Feature | dinv | Status |
 |---|---|---|
-| Stat ceilings | `statBonus` | Scrape `stats`, parse the `Spells Bonus` row, keep a per-level moving average, compute `ceiling = min(200, level − 10×tier) − spellBonus`. **Everything below depends on this.** dinv ships a 211-row fallback table for a fresh install. |
-| Optimal set per level | `analyze` | Simulated annealing over stat handicaps: build a set, find which stats are over the ceiling, lower those weights by `1/intensity`, rebuild, keep the best. 201 levels × intensity 8. |
-| Where is this item used | `usage` | Pure lookup over a completed analysis. |
-| What is this item worth | `compare` | Remove it, re-run the analysis, diff per level. |
-| Should I bid on this | `covet` | Same, for an auction item identified via `bid <n>`. |
+| Stat ceilings | `statBonus` | **Done** &mdash; `/awinv stats` parses the Spells Bonus row and averages per level; seeded until then. |
+| Optimal set per level | `analyze` | **Done, simplified** &mdash; `/awinv analyze [step]` sweeps in the background. Ours re-ranks per level; dinv additionally anneals stat handicaps, which sharpens results when several stats sit at their ceiling. |
+| Where is this item used | `usage` | **Done** &mdash; `/awinv usage <query>`, and `/awinv plan <slot>` for one slot's upgrade path. |
+| What is this item worth | `compare` | **Partly** &mdash; `/awinv compare <item>` reports the levels it wins and its score; it does not re-run the sweep without the item to diff stat totals. |
+| Should I bid on this | `covet` | Not ported &mdash; needs auction scraping. |
 
 ### C. Bigger subsystems
 
@@ -62,18 +62,14 @@ command names are in brackets. Current: aw-inv 2.5.0.
 | Level-banded weights | `priority` blocks | dinv's weights vary by level range (sanctuary worth 50 at level 10, 10 by level 100). Ours are flat. |
 | Priority CRUD | `priority create\|clone\|copy\|paste\|compare` | We can list, switch, set weights, delete. No cloning, clipboard sharing, or comparing two priorities' output. |
 
-### D. Filters we do not yet apply when ranking
+### D. Eligibility filters
 
-dinv rejects items the character cannot actually use. We currently rank on
-level alone.
+**Done:** level, `heroonly` under 200, alignment restrictions (anti-good /
+anti-neutral / anti-evil), ignored bags, and `~slot` bans from the profile.
 
-- Alignment: `anti-good` / `anti-neutral` / `anti-evil` against your alignment
-- `heroonly` unless base level ≥ 200
-- Weapon types the class cannot wield at this level
-- Portal-slot items without the Portal wish (needs `wish list` parsing)
-- Priority slot bans (`~head`, `~second`) and damtype bans
-
----
+**Not yet:** weapon types the class cannot wield (needs the class/level
+ability table), and portal-slot items without the Portal wish (needs
+`wish list` parsing).
 
 ## Deliberately not ported
 
