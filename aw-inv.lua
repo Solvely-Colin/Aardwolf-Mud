@@ -77,7 +77,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "2.1.1",
+    version     = "2.1.2",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -299,6 +299,25 @@ local function font_base()
 end
 
 --[[
+    Position-base probe, measured live on this runtime: string.find
+    returned 0-BASED positions — one short of Lua's contract. The
+    symptom was every row rejecting with an empty type field while the
+    row text itself printed back intact, which acquitted trim and sub
+    and left exactly one suspect. (It would also produce MUDFORGE-NOTES
+    11's "init never advances" hang: a walk that adds a one-short q
+    lands on the comma it just found, forever.) pfind asks once where
+    "y" sits in "xy" and corrects every position-consuming find.
+]]
+local FIND_ADJ = 0
+if string.find("xy", "y", 1, true) == 1 then FIND_ADJ = 1 end
+
+local function pfind(s, needle)
+    local q = string.find(s, needle, 1, true)
+    if q == nil then return nil end
+    return q + FIND_ADJ
+end
+
+--[[
     Split on every comma by slicing — string.find's init argument does not
     advance on this client and a stuck loop takes the client down, so the
     haystack shrinks instead. The guard is a runaway cap, not a row limit.
@@ -309,7 +328,7 @@ local function csv_fields(s)
     local guard = 0
     while guard < 300 do
         guard = guard + 1
-        local p = string.find(rest, ",", 1, true)
+        local p = pfind(rest, ",", 1, true)
         if p == nil then
             table.insert(out, rest)
             return out
@@ -381,7 +400,7 @@ local function split_cols(s)
     local guard = 0
     while guard < 60 do
         guard = guard + 1
-        local p = string.find(rest, "  ", 1, true)
+        local p = pfind(rest, "  ", 1, true)
         if p == nil then
             if trim(rest) ~= "" then table.insert(out, trim(rest)) end
             return out
@@ -416,7 +435,7 @@ end
 local function parse_row(line, where)
     local s = trim(line)
 
-    local p1 = string.find(s, ",", 1, true)
+    local p1 = pfind(s, ",", 1, true)
     if p1 == nil or p1 < 7 then
         st.rej = "no-serial: " .. string.sub(s, 1, 60)
         return false
@@ -428,7 +447,7 @@ local function parse_row(line, where)
     end
 
     local rest = string.sub(s, p1 + 1)
-    local p2 = string.find(rest, ",", 1, true)
+    local p2 = pfind(rest, ",", 1, true)
     if p2 == nil then
         st.rej = "no-flags: " .. string.sub(s, 1, 60)
         return false
@@ -442,7 +461,7 @@ local function parse_row(line, where)
     local guard = 0
     while guard < 300 do
         guard = guard + 1
-        local q = string.find(string.sub(rest, off + 1), ",", 1, true)
+        local q = pfind(string.sub(rest, off + 1), ",", 1, true)
         if q == nil then break end
         off = off + q
         c1 = c2
@@ -531,7 +550,7 @@ local function load_db()
     while rest ~= "" and guard < 5000 do
         guard = guard + 1
         local line = rest
-        local p = string.find(rest, "\n", 1, true)
+        local p = pfind(rest, "\n", 1, true)
         if p == nil then
             rest = ""
         else
@@ -544,7 +563,7 @@ local function load_db()
         local g2 = 0
         while g2 < 12 do
             g2 = g2 + 1
-            local q = string.find(rest2, "\t", 1, true)
+            local q = pfind(rest2, "\t", 1, true)
             if q == nil then
                 table.insert(f, rest2)
                 rest2 = ""
@@ -610,7 +629,7 @@ local function load_stats()
     while rest ~= "" and guard < 8000 do
         guard = guard + 1
         local line = rest
-        local p = string.find(rest, "\n", 1, true)
+        local p = pfind(rest, "\n", 1, true)
         if p == nil then
             rest = ""
         else
@@ -625,7 +644,7 @@ local function load_stats()
         while rest2 ~= "" and g2 < 80 do
             g2 = g2 + 1
             local field = rest2
-            local q = string.find(rest2, "\t", 1, true)
+            local q = pfind(rest2, "\t", 1, true)
             if q == nil then
                 rest2 = ""
             else
@@ -636,7 +655,7 @@ local function load_stats()
             if serial == "" then
                 serial = trim(field)
             else
-                local eq = string.find(field, "=", 1, true)
+                local eq = pfind(field, "=", 1, true)
                 if eq ~= nil and eq > 1 then
                     local k = string.sub(field, 1, eq - 1)
                     local v = string.sub(field, eq + 1)
@@ -687,7 +706,7 @@ local function load_prof()
     while rest ~= "" and guard < 100 do
         guard = guard + 1
         local part = rest
-        local p = string.find(rest, "|", 1, true)
+        local p = pfind(rest, "|", 1, true)
         if p == nil then
             rest = ""
         else
@@ -699,7 +718,7 @@ local function load_prof()
             first = false
             if trim(part) ~= "" then prof.active = trim(part) end
         else
-            local c = string.find(part, ":", 1, true)
+            local c = pfind(part, ":", 1, true)
             if c ~= nil and c > 1 then
                 local name = string.sub(part, 1, c - 1)
                 local ws = {}
@@ -708,14 +727,14 @@ local function load_prof()
                 while rest2 ~= "" and g2 < 80 do
                     g2 = g2 + 1
                     local kv = rest2
-                    local q = string.find(rest2, ",", 1, true)
+                    local q = pfind(rest2, ",", 1, true)
                     if q == nil then
                         rest2 = ""
                     else
                         kv = string.sub(rest2, 1, q - 1)
                         rest2 = string.sub(rest2, q + 1)
                     end
-                    local eq = string.find(kv, "=", 1, true)
+                    local eq = pfind(kv, "=", 1, true)
                     if eq ~= nil and eq > 1 then
                         local w = tonumber(string.sub(kv, eq + 1))
                         if w ~= nil then ws[string.sub(kv, 1, eq - 1)] = w end
@@ -801,7 +820,7 @@ local function id_line(body)
 
     -- plain "Label : value" pairs, two to a row, split on column padding
     for _, chunk in ipairs(split_cols(body)) do
-        local c = string.find(chunk, ":", 1, true)
+        local c = pfind(chunk, ":", 1, true)
         if c ~= nil and c > 1 then
             local label = trim(string.sub(chunk, 1, c - 1))
             local value = trim(string.sub(chunk, c + 1))
@@ -911,7 +930,7 @@ local function id_queue(which)
     local added = 0
     for serial, it in pairs(db.items) do
         if type(it) == "table" and (it.where == "inv" or it.where == "eq"
-            or string.find(it.where, "c:", 1, true) == 1) then
+            or pfind(it.where, "c:", 1, true) == 1) then
             local known = type(ids.stats[serial]) == "table"
             if which == "all" or (which == "missing" and not known) then
                 table.insert(ids.q, serial)
@@ -938,7 +957,7 @@ end
 
 local function on_id_close(c, line, w)
     if type(ids.rec) ~= "table" then return end
-    if string.find(tostring(line or ""), "full appraisal", 1, true) ~= nil then
+    if pfind(tostring(line or ""), "full appraisal", 1, true) ~= nil then
         ids.rec.full = 0
     end
     id_store()
@@ -969,7 +988,7 @@ local function slot_of(serial)
     local wearable = string.lower(trim(tostring(r.wearable or "")))
     if wearable == "" then return "" end
     -- first word: "wield (weapon)" and friends carry trailing commentary
-    local p = string.find(wearable, " ", 1, true)
+    local p = pfind(wearable, " ", 1, true)
     if p ~= nil then wearable = string.sub(wearable, 1, p - 1) end
     return wearable
 end
@@ -1179,11 +1198,11 @@ local CSS_HEAD = [==[
 local function match_filter(it)
     if filter == "" then return true end
     local q = string.lower(filter)
-    if string.find(string.lower(it.name), q, 1, true) ~= nil then return true end
+    if pfind(string.lower(it.name), q, 1, true) ~= nil then return true end
     local tn = TYPE_NAME[it.itype]
     if type(tn) == "string"
-        and string.find(string.lower(tn), q, 1, true) ~= nil then return true end
-    if string.find(it.serial, q, 1, true) ~= nil then return true end
+        and pfind(string.lower(tn), q, 1, true) ~= nil then return true end
+    if pfind(it.serial, q, 1, true) ~= nil then return true end
     return false
 end
 
@@ -1258,7 +1277,7 @@ local function count_where(prefix)
     for _, it in pairs(db.items) do
         if type(it) == "table" then
             if it.where == prefix
-                or (string.find(it.where, prefix, 1, true) == 1 and prefix == "c:") then
+                or (pfind(it.where, prefix, 1, true) == 1 and prefix == "c:") then
                 n = n + 1
             end
         end
@@ -1392,7 +1411,7 @@ local function render_use()
         local found = {}
         for _, it in pairs(db.items) do
             if type(it) == "table" and types[it.itype] == true
-                and (it.where == "inv" or string.find(it.where, "c:", 1, true) == 1)
+                and (it.where == "inv" or pfind(it.where, "c:", 1, true) == 1)
                 and match_filter(it) then
                 table.insert(found, it)
             end
@@ -1444,7 +1463,7 @@ render = function()
             .. "rescan. <b>serials</b> shows each item's object id, the number "
             .. "Aardwolf's data commands key on. Vault data needs a vault in the "
             .. "room; <code>/awinv vault</code> asks for it.</div>"
-    elseif string.find(view, "item:", 1, true) == 1 then
+    elseif pfind(view, "item:", 1, true) == 1 then
         body = render_item(string.sub(view, 6))
     elseif view == "best" then
         body = render_best()
@@ -1535,9 +1554,9 @@ end
 -- the Aardwolf prompt, by plain text — hp, mn and mv together are
 -- structural and no data row carries all three (EQ Search's test)
 local function is_prompt(line)
-    return string.find(line, "hp ", 1, true) ~= nil
-       and string.find(line, "mn ", 1, true) ~= nil
-       and string.find(line, "mv ", 1, true) ~= nil
+    return pfind(line, "hp ", 1, true) ~= nil
+       and pfind(line, "mn ", 1, true) ~= nil
+       and pfind(line, "mv ", 1, true) ~= nil
 end
 
 -- forward-declared: scan_end schedules the next scan
@@ -1686,7 +1705,7 @@ local function on_invmon(c, line, w)
     if qol.watchWear == true then
         local plain = tostring(line or "")
         local payload = ""
-        local p = string.find(plain, "}", 1, true)
+        local p = pfind(plain, "}", 1, true)
         if p ~= nil then payload = string.sub(plain, p + 1) end
         local f = csv_fields(trim(payload))
         if #f >= 2 and trim(f[1]) == "1" and trim(f[2]) ~= "" then
@@ -2064,11 +2083,11 @@ function init()
 
             elseif string.sub(restLow, 1, 4) == "set " then
                 -- prio set <name> <stat> <weight>; a new name makes a profile
-                local p1 = string.find(restLow, " ", 1, true)
+                local p1 = pfind(restLow, " ", 1, true)
                 local tail = trim(string.sub(restLow, p1 + 1))
-                local p2 = string.find(tail, " ", 1, true)
+                local p2 = pfind(tail, " ", 1, true)
                 local rest2 = (p2 ~= nil) and trim(string.sub(tail, p2 + 1)) or ""
-                local p3 = string.find(rest2, " ", 1, true)
+                local p3 = pfind(rest2, " ", 1, true)
                 if p2 == nil or p3 == nil then
                     utilprint(TAG .. "usage: /awinv prio set <name> <stat> <weight>")
                 else
