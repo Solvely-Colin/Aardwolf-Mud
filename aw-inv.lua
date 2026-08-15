@@ -37,11 +37,13 @@
     of the packet it was created in, and these blocks arrive whole.
 
     Sequencing without coroutines (dinv blocked on MUSHclient's wait library;
-    there is no Lua VM here): a queue of expected blocks. A refresh sends
-    eqdata, invdata and keyring data; containers discovered in the main
-    inventory are scanned one per {/invdata}, each request pushed onto the
-    queue so an arriving opener is matched to what asked for it. A 10s timer
-    releases a block that never closes, the same guard Core keeps.
+    there is no Lua VM here): a scan queue, one data command in flight at a
+    time. Measured live, the {tag} wrappers are NOT in this client's stream
+    — the rows arrive bare — so a scan is not keyed on markers: every
+    row-shaped line while a scan is open files under that scan's location,
+    and the scan ends at the prompt (EQ Search's test), at a {/closer}
+    where one exists, or at a timeout. Containers found by the main
+    inventory scan queue their own scans behind it.
 
     {invmon} lines (Core gags them; we still see them) mark the table dirty
     and schedule one debounced refresh, so the panel follows looting without
@@ -75,7 +77,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "2.0.5",
+    version     = "2.1.0",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -131,23 +133,32 @@ local db = {
 }
 
 --[[
-    Capture state. expect is the queue of blocks we asked for, oldest first;
-    each entry declares kind ("eq"|"inv"|"key"|"vault"|"c"), id ("" unless a
-    container scan) and got (false until its opener arrives).
+    Capture state. scanQ is the line of data commands still to run this
+    refresh, one in flight at a time; inBlock is the location the open scan
+    files under ("eq", "inv", "key", "vault", "c:<serial>") or "" idle.
+
+    Scans are NOT keyed on {tag} wrappers. Measured live: the eqdata and
+    invdata rows arrive with no {braces} markers anywhere in the stream —
+    even {invdata}, which Core's gag would otherwise swallow whole, scrolled
+    past raw. So the rows themselves are the signal (8+ CSV fields behind a
+    long numeric serial) and the prompt is the terminator, the same way EQ
+    Search ends its capture. Wrapper triggers stay registered as counters
+    and early terminators for setups where they do exist.
 ]]
 local st = {
-    expect   = {},
-    inBlock  = "",       -- "" | eq | inv | key | vault | c
-    inId     = "",       -- container serial while inBlock == "c"
-    mine     = false,    -- current block is one we requested
-    buf      = {},       -- serials seen in the current block
-    conQueue = {},       -- containers awaiting a scan this refresh
+    scanQ    = {},
+    inBlock  = "",
+    inId     = "",       -- kept for state compatibility; unused by scans
+    mine     = false,    -- current scan is one we requested
+    buf      = {},       -- serials seen in the current scan
+    conQueue = {},       -- kept for debug display; containers ride scanQ
     blockTimer = nil,
     pokeTimer  = nil,    -- invmon debounce
     lastAuto   = 0,      -- value of clockMs at the last auto refresh
     clockMs    = 0,      -- counter of debounce windows, bumped per invmon burst
     -- lifetime counters, so /awinv debug can say which stage went quiet
     nSent = 0, nOpen = 0, nClose = 0, nRow = 0, nParsed = 0,
+    buildAfter = false,  -- /awinv build: identify everything once scans finish
 }
 
 local widget  = nil
@@ -396,8 +407,10 @@ local function parse_row(line, where)
     local n = #f
     if n < 8 then return false end
 
+    -- scans read the open stream, so the shape test carries the weight:
+    -- a long all-digit serial up front, numeric fields behind the name
     local serial = trim(f[1])
-    if serial == "" or tonumber(serial) == nil then return false end
+    if serial == "" or #serial < 6 or tonumber(serial) == nil then return false end
 
     local name = f[3]
     local i = 4
@@ -1477,123 +1490,114 @@ local function block_release()
     st.buf     = {}
 end
 
-local function send_next_scan()
-    if #st.conQueue == 0 then return end
-    local con = table.remove(st.conQueue, 1)
-    table.insert(st.expect, { kind = "c", id = con, got = false })
-    send("invdata " .. con)
+-- the Aardwolf prompt, by plain text — hp, mn and mv together are
+-- structural and no data row carries all three (EQ Search's test)
+local function is_prompt(line)
+    return string.find(line, "hp ", 1, true) ~= nil
+       and string.find(line, "mn ", 1, true) ~= nil
+       and string.find(line, "mv ", 1, true) ~= nil
 end
+
+-- forward-declared: scan_end schedules the next scan
+local next_scan = nil
 
 --[[
-    Match an arriving opener to the oldest expectation of a compatible kind.
-    invdata answers both "inv" and "c" expectations — the queue order says
-    which this one is. An opener nothing asked for is the user's own typing:
-    parsed all the same, never gagged.
+    A scan ends at the prompt, at a {/closer} where wrappers exist, or at
+    the timeout. Ending the main inventory scan queues one scan per
+    container it named.
 ]]
-local function take_expected(tagname)
-    local want1 = tagname          -- eqdata->eq etc. mapped by caller
-    local idx = 0
-    for i, e in ipairs(st.expect) do
-        if idx == 0 and type(e) == "table" and e.got == false then
-            if e.kind == want1 or (want1 == "inv" and e.kind == "c") then
-                idx = i
-            end
-        end
-    end
-    if idx == 0 then return nil end
-    local e = st.expect[idx]
-    e.got = true
-    table.remove(st.expect, idx)
-    return e
-end
-
---[[
-    One opener per tag, kind bound by closure rather than read from a
-    capture. The first build used one trigger with a capturing alternation
-    and a trailing optional group — and it never fired once against the
-    live client, while every shipping plugin's triggers are plain patterns
-    or (?:non-capturing) groups. Mirror what is measured to work.
-]]
-local function open_kind(kind, tagname)
-    st.nOpen = st.nOpen + 1
-
-    local e = take_expected(kind)
-
-    st.inBlock = kind
-    st.inId    = ""
-    st.mine    = (e ~= nil)
-    st.buf     = {}
-
-    if type(e) == "table" and e.kind == "c" then
-        st.inBlock = "c"
-        st.inId    = e.id
-    end
-
-    -- refile: this block replaces that location's contents
-    if st.inBlock == "c" then
-        clear_where("c:" .. st.inId)
-    else
-        clear_where(st.inBlock)
-    end
-    if st.inBlock == "key" then db.haveKey = true end
-    if st.inBlock == "vault" then db.haveVault = true end
-
-    if st.blockTimer ~= nil then pcall(removeTimer, st.blockTimer) end
-    st.blockTimer = addTimer(BLOCK_MS, function()
-        if st.inBlock ~= "" then
-            utilprint(TAGR .. "{" .. tagname .. "} never closed; released.")
-            block_release()
-            render()
-        end
-    end)
-
-    if st.mine and cfg.gag then return false end
-end
-
-local function on_close(c, line, w)
-    st.nClose = st.nClose + 1
+local function scan_end()
     if st.inBlock == "" then return end
-
-    local wasMine = st.mine
-    local wasInv  = (st.inBlock == "inv")
+    local wasInv = (st.inBlock == "inv")
     block_release()
 
-    -- the main inventory names the containers; scan them one at a time
-    if wasInv and wasMine then
-        st.conQueue = {}
+    if wasInv then
         for _, con in ipairs(container_list()) do
-            table.insert(st.conQueue, con.serial)
+            table.insert(st.scanQ, {
+                cmd = "invdata " .. con.serial, where = "c:" .. con.serial,
+            })
         end
-        send_next_scan()
-    elseif wasMine then
-        send_next_scan()
     end
 
     save_db()
     render()
 
-    if wasMine and cfg.gag then return false end
+    --[[
+        dinv's 'build': once the last scan has drained, walk everything the
+        scans found through the identify queue. The refresh knew the items;
+        the ids know their stats.
+    ]]
+    if #st.scanQ == 0 and st.buildAfter == true then
+        st.buildAfter = false
+        local added = id_queue("missing")
+        utilprint(TAG .. "scan done - identifying " .. added
+            .. " unidentified item(s), one at a time...")
+        id_next()
+    end
+
+    addTimer(250, function()
+        if type(next_scan) == "function" then next_scan() end
+    end)
+end
+
+next_scan = function()
+    if st.inBlock ~= "" then return end
+    if #st.scanQ == 0 then return end
+
+    local s = table.remove(st.scanQ, 1)
+    clear_where(s.where)
+    st.inBlock = s.where
+    st.mine    = true
+    st.buf     = {}
+    if s.where == "key" then db.haveKey = true end
+    if s.where == "vault" then db.haveVault = true end
+
+    st.nSent = st.nSent + 1
+    send(s.cmd)
+
+    if st.blockTimer ~= nil then pcall(removeTimer, st.blockTimer) end
+    st.blockTimer = addTimer(BLOCK_MS, function()
+        if st.inBlock ~= "" then scan_end() end
+    end)
+end
+
+-- wrappers, where a setup has them: openers are counted, a closer ends the
+-- open scan a shade earlier than the prompt would
+local function on_open_marker(c, line, w)
+    st.nOpen = st.nOpen + 1
+end
+
+local function on_close(c, line, w)
+    st.nClose = st.nClose + 1
+    scan_end()
 end
 
 local function on_row(c, line, w, raw)
     if st.inBlock == "" then return end
-    st.nRow = st.nRow + 1
 
     local plain = trim(tostring(line or ""))
     if plain == "" then return end
 
-    -- {invitem}payload is a row wearing a wrapper; any other marker is not a row
+    if is_prompt(plain) then
+        scan_end()
+        return
+    end
+
     if string.sub(plain, 1, 9) == "{invitem}" then
         plain = string.sub(plain, 10)
+    elseif string.sub(plain, 1, 2) == "{/" then
+        scan_end()
+        return
     elseif string.sub(plain, 1, 1) == "{" then
         return
     end
 
-    local where = st.inBlock
-    if where == "c" then where = "c:" .. st.inId end
-    parse_row(plain, where)
+    st.nRow = st.nRow + 1
+    local okp = parse_row(plain, st.inBlock)
 
-    if st.mine and cfg.gag then return false end
+    -- scans run inside live output and chatter interleaves; only a line
+    -- that really was a data row is ours to hide
+    if okp == true and st.mine and cfg.gag then return false end
 end
 
 local function on_vaultcounts(c, line, w)
@@ -1605,35 +1609,24 @@ local function on_vaultcounts(c, line, w)
     if cfg.gag then return false end
 end
 
--- keyring and vault answer sleep with a dream; drop the expectation
+-- keyring and vault answer sleep with a dream; skip to the next scan
 local function on_dream(c, line, w)
-    local keep = {}
-    for _, e in ipairs(st.expect) do
-        if type(e) == "table" and e.kind ~= "key" and e.kind ~= "vault" then
-            table.insert(keep, e)
-        end
+    if st.inBlock == "key" or st.inBlock == "vault" then
+        scan_end()
     end
-    st.expect = keep
 end
 
 local function refresh(withVault)
-    st.expect   = {}
-    st.conQueue = {}
     block_release()
-
-    table.insert(st.expect, { kind = "eq", id = "", got = false })
-    send("eqdata")
-    table.insert(st.expect, { kind = "inv", id = "", got = false })
-    send("invdata")
-    table.insert(st.expect, { kind = "key", id = "", got = false })
-    send("keyring data")
-    st.nSent = st.nSent + 3
-
+    st.scanQ = {
+        { cmd = "eqdata",       where = "eq"  },
+        { cmd = "invdata",      where = "inv" },
+        { cmd = "keyring data", where = "key" },
+    }
     if withVault == true then
-        table.insert(st.expect, { kind = "vault", id = "", got = false })
-        send("vault data")
-        st.nSent = st.nSent + 1
+        table.insert(st.scanQ, { cmd = "vault data", where = "vault" })
     end
+    next_scan()
 end
 
 --[[
@@ -1759,14 +1752,10 @@ function init()
         alternation never matched at all, and a priority-70 trigger without
         keepEvaluating never saw a line the priority-90 gag had discarded.
     ]]
-    addTrigger("^\\{eqdata\\}", function(c, l, w) return open_kind("eq", "eqdata") end,
-        { type = "regex", keepEvaluating = true })
-    addTrigger("^\\{invdata\\}", function(c, l, w) return open_kind("inv", "invdata") end,
-        { type = "regex", keepEvaluating = true })
-    addTrigger("^\\{keyring\\}", function(c, l, w) return open_kind("key", "keyring") end,
-        { type = "regex", keepEvaluating = true })
-    addTrigger("^\\{vault\\}", function(c, l, w) return open_kind("vault", "vault") end,
-        { type = "regex", keepEvaluating = true })
+    addTrigger("^\\{eqdata\\}", on_open_marker, { type = "regex", keepEvaluating = true })
+    addTrigger("^\\{invdata\\}", on_open_marker, { type = "regex", keepEvaluating = true })
+    addTrigger("^\\{keyring\\}", on_open_marker, { type = "regex", keepEvaluating = true })
+    addTrigger("^\\{vault\\}", on_open_marker, { type = "regex", keepEvaluating = true })
     addTrigger("^\\{/(?:invdata|eqdata|keyring|vault)\\}", on_close,
         { type = "regex", keepEvaluating = true })
     addTrigger("^\\{vaultcounts\\}([0-9]+),([0-9]+),([0-9]+)", on_vaultcounts,
@@ -1916,8 +1905,7 @@ function init()
                 .. " | closes " .. st.nClose .. " | rows " .. st.nRow
                 .. " | parsed " .. st.nParsed)
             utilprint(TAG .. "items " .. nItems .. " | id records " .. nStats
-                .. " | inBlock '" .. st.inBlock .. "' | expect " .. #st.expect
-                .. " | conQueue " .. #st.conQueue)
+                .. " | inBlock '" .. st.inBlock .. "' | scanQ " .. #st.scanQ)
             utilprint(TAG .. "gag " .. tostring(cfg.gag) .. " | auto "
                 .. tostring(cfg.auto) .. " | id pending '" .. ids.pending
                 .. "' | id queue " .. #ids.q)
@@ -1925,6 +1913,14 @@ function init()
         elseif low == "refresh" then
             refresh(false)
             utilprint(TAG .. "rescanning eq, inventory, containers and keyring...")
+            showWidget(widget)
+
+        elseif low == "build" then
+            -- dinv's 'build confirm': full scan, then id everything unknown
+            st.buildAfter = true
+            refresh(false)
+            utilprint(TAG .. "building: full rescan, then identifying every "
+                .. "unknown item. Stay put; 'id stop' halts the id pass.")
             showWidget(widget)
 
         elseif low == "vault" then
@@ -2157,6 +2153,7 @@ function init()
             utilprint("$w  /awinv                     show the panel")
             utilprint("$w  /awinv hide                put it away")
             utilprint("$w  /awinv refresh             rescan eq, inv, containers, keyring")
+            utilprint("$w  /awinv build               dinv's build: rescan, then id everything")
             utilprint("$w  /awinv vault               rescan with the vault too")
             utilprint("$w  /awinv search <text>       filter the panel")
             utilprint("$w  /awinv id <serial|missing|all|stop>   identify into the database")
