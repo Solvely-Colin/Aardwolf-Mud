@@ -77,7 +77,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "2.4.2",
+    version     = "2.4.3",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -159,6 +159,7 @@ local st = {
     -- lifetime counters, so /awinv debug can say which stage went quiet
     nSent = 0, nOpen = 0, nClose = 0, nRow = 0, nParsed = 0,
     rej = "",            -- why the last row was rejected, for /awinv debug
+    nEmpty = 0,          -- scans that closed having parsed nothing
     buildAfter = false,  -- /awinv build: identify everything once scans finish
     scanRows = 0,        -- rows this scan has produced; gates the prompt-close
     scanSeq = 0,         -- scan token, so a grace timer can't close a later scan
@@ -2149,6 +2150,22 @@ local function scan_end()
         utilprint(TAG .. "scan complete: " .. nAll .. " item(s), "
             .. count_where("eq") .. " worn, " .. count_where("inv")
             .. " carried, " .. nCon .. " container(s).")
+
+        --[[
+            Carrying nothing while wearing plenty is almost never true —
+            it is Core's tag gag. Core classifies {invdata} as a BLOCK and
+            swallows every line between the markers; {eqdata} and
+            {keyring} are not on that list, which is exactly why those two
+            capture and this one comes back empty. Name the cure rather
+            than reporting an empty bag.
+        ]]
+        if count_where("inv") == 0 and count_where("eq") > 0 then
+            utilprint(TAGR .. "carried 0 while worn " .. count_where("eq")
+                .. " - if you ARE carrying things, Core is gagging {invdata} "
+                .. "as a block, which hides it from this plugin too. Fix:")
+            utilprint("$Y  /awcore tags marker invdata$w")
+            utilprint("$K  then '/awinv build' again.$w")
+        end
 
         if st.buildAfter == true then
             st.buildAfter = false
