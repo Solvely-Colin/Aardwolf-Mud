@@ -9,14 +9,14 @@
     {
       "id": "aw-inv",
       "name": "Aardwolf Inventory",
-      "version": "2.1.3",
+      "version": "2.1.4",
       "author": "Catdad",
       "description": "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
       "category": "widgets",
-      "downloadUrl": "https://raw.githubusercontent.com/Solvely-Colin/Aardwolf-Mud/main/dist/aw-inv-2.1.3.json",
+      "downloadUrl": "https://raw.githubusercontent.com/Solvely-Colin/Aardwolf-Mud/main/dist/aw-inv-2.1.4.json",
       "format": "json",
-      "sha256": "48fec40f9537b364566d5bb30780db8bef5ada89607ad8a2ad21638beaa22aa2",
-      "size": 88744,
+      "sha256": "e53b9106a4f6af436dcfcf078fdedbdd5fc7df18f93b88956aecc010008c24de",
+      "size": 90121,
       "license": "MIT",
       "homepage": "https://github.com/Solvely-Colin/Aardwolf-Mud"
     },

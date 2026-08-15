@@ -77,7 +77,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "2.1.3",
+    version     = "2.1.4",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -1977,6 +1977,31 @@ function init()
             if st.rej ~= "" then
                 utilprint(TAG .. "last rejected row: " .. st.rej)
             end
+
+            --[[
+                Self-test: parse a canned row (fake serial) right here and
+                print what every stage produced. If this parses while live
+                rows don't, the fault is state or timing; if it fails, the
+                probes name the primitive. One paste, full verdict.
+            ]]
+            utilprint(TAG .. "probe: find13=" .. tostring(pfind("a,b", ","))
+                .. " tonum='" .. tostring(tonumber("13")) .. "'"
+                .. " trim='" .. trim("  13  ") .. "'"
+                .. " numor=" .. tostring(num_or("13", -99))
+                .. " sub=" .. string.sub("abcdef", 3, 4))
+            st.rej = ""
+            local okST = parse_row("999999001,M,a stone key,10,13,0,-1,562227", "selftest")
+            local rec = db.items["999999001"]
+            if okST == true and type(rec) == "table" then
+                utilprint(TAG .. "selftest PARSED: name='" .. tostring(rec.name)
+                    .. "' level=" .. tostring(rec.level)
+                    .. " type=" .. tostring(rec.itype)
+                    .. " wear=" .. tostring(rec.wear)
+                    .. " timer=" .. tostring(rec.timer))
+            else
+                utilprint(TAGR .. "selftest FAILED: " .. st.rej)
+            end
+            db.items["999999001"] = nil
 
         elseif low == "refresh" then
             refresh(false)
