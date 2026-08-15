@@ -77,7 +77,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "2.1.5",
+    version     = "2.2.0",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -189,6 +189,7 @@ local ids = {
     guard    = nil,     -- an id that never answers
     ran      = 0,       -- ids completed this run, for the done message
     trigs    = {},      -- the three box triggers, enabled only while an id is out
+    restore  = "",      -- undo command after this id: wear it back / re-bag it
 }
 
 -- identify-box labels worth keeping, box text -> record key
@@ -893,6 +894,12 @@ local function id_store()
     local serial = ids.pending
     ids.pending = ""
 
+    -- wear it back / re-bag it before anything else goes out
+    if ids.restore ~= "" then
+        send(ids.restore)
+        ids.restore = ""
+    end
+
     if type(r) == "table" and serial ~= "" then
         r.at = stamp()
         -- keep what an older record had that this box didn't mention
@@ -932,6 +939,28 @@ id_next = function()
         return
     end
 
+    --[[
+        'id' only reaches the carried inventory — measured live: a worn
+        item answers "You do not have that item." dinv's build removed,
+        identified and re-wore each piece, which is why it wanted a quiet
+        room; same here. Container contents come out and go back. The
+        restore command fires after the box lands or the guard gives up,
+        so a cursed piece that refuses removal costs one skipped id and a
+        harmless wear attempt, not a naked character.
+    ]]
+    local it2 = db.items[serial]
+    ids.restore = ""
+    if type(it2) == "table" then
+        if it2.where == "eq" then
+            ids.restore = "wear " .. serial
+            send("remove " .. serial)
+        elseif pfind(it2.where, "c:") == 1 then
+            local con = string.sub(it2.where, 3)
+            ids.restore = "put " .. serial .. " " .. con
+            send("get " .. serial .. " " .. con)
+        end
+    end
+
     ids.pending = serial
     id_trigs(true)
     send("id " .. serial)
@@ -941,6 +970,7 @@ id_next = function()
         ids.guard = nil
         if ids.pending == serial and type(ids.rec) ~= "table" then
             utilprint(TAGR .. "no id box for " .. serial .. " - skipped.")
+            if ids.restore ~= "" then send(ids.restore); ids.restore = "" end
             ids.pending = ""
             id_trigs(false)
             id_next()
@@ -1724,6 +1754,10 @@ local function on_invmon(c, line, w)
         flight, action 1 (Removed) names the item the ring displaced — dinv
         tracked the slot; the event is simpler and arrives anyway.
     ]]
+    -- the id pass removes and re-wears gear, which fires invmon endlessly;
+    -- auto-refreshing off our own churn would interleave scans into open
+    -- id boxes
+    if ids.pending ~= "" or #ids.q > 0 then return end
     if qol.watchWear == true then
         local plain = tostring(line or "")
         local payload = ""
