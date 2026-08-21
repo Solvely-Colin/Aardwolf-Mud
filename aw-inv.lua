@@ -77,7 +77,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "3.4.0",
+    version     = "3.5.0",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -1388,9 +1388,10 @@ local function id_trigs(onoff)
 end
 
 -- forward-declared: id_store schedules the next send; the shop-capture
--- handler lives with the consume machinery far below
+-- and covet handlers live with their machinery far below
 local id_next = nil
 local cshop_capture = nil
+local covet_capture = nil
 
 local function id_store()
     local r = ids.rec
@@ -1409,6 +1410,11 @@ local function id_store()
     ]]
     if serial == "@shop" then
         if type(cshop_capture) == "function" then cshop_capture(r) end
+        return
+    end
+    -- likewise a bid/lbid box: evaluated, reported, never stored
+    if serial == "@bid" then
+        if type(covet_capture) == "function" then covet_capture(r) end
         return
     end
 
@@ -3699,6 +3705,155 @@ local function cshop_drink(cat, size, n)
 end
 
 ---
+-- covet, dinv's should-I-bid: 'bid <n>' prints the same identify box an
+-- id does, so the capture rides the id machinery under a "@bid" sentinel.
+-- The item is injected as a synthetic record, ranked against everything
+-- you own for its slot across the levels, reported, and thrown away —
+-- nothing is stored, exactly as dinv's covet reverts itself.
+---
+
+local covet = { num = 0, step = 10 }
+
+covet_capture = function(r)
+    local num = covet.num
+    covet.num = 0
+    if num < 1 then return end
+
+    if type(r) ~= "table" then
+        utilprint(TAGR .. "no identify box for auction #" .. num
+            .. " - wrong number, or the auction already ended.")
+        return
+    end
+
+    -- Affect Mods words become aff_ flags, the same expansion id_store
+    -- does for real items, so effect weights apply to the candidate
+    if type(r.affects) == "string" and r.affects ~= "" then
+        local words = string.gsub(string.lower(r.affects), ",", " ")
+        for wd in string.gmatch(words, "%a+") do
+            r["aff_" .. wd] = 1
+        end
+    end
+
+    local key = "@bid"
+    local lv0 = tonumber(r.level)
+    if lv0 == nil or lv0 < 1 then lv0 = 1 end
+    local nm = (type(r.item) == "string" and r.item ~= "") and r.item
+        or ("auction #" .. num)
+
+    db.items[key] = {
+        serial = key, name = nm, level = lv0, itype = 0,
+        flags = (type(r.flags) == "string") and r.flags or "",
+        where = "auction", unique = 0, wearloc = "", timer = 0,
+    }
+    ids.stats[key] = r
+
+    local slot = slot_of(key)
+    local scNow = score_of(key)
+
+    utilprint(TAG .. "auction #" .. num .. ": $C" .. nm .. "$w  (L" .. lv0
+        .. ((slot ~= "") and (" " .. slot) or ", not wearable") .. ")")
+    utilprint("$w  scores " .. tostring(scNow) .. " under " .. prof.active
+        .. " at level " .. char_level())
+
+    if slot == "" then
+        utilprint("$K  no wear location, so there is nothing to rank it "
+            .. "against - judge it by the score alone.$w")
+        db.items[key] = nil
+        ids.stats[key] = nil
+        return
+    end
+
+    local cap = tonumber(SLOT_CAP[slot])
+    if cap == nil or cap < 1 then cap = 1 end
+    local maxLv = 201 + 10 * char_tier()
+    local step = covet.step
+    local wins = {}
+    local haveMargin = false
+    local margin = 0
+    local outName = ""
+
+    local lv = lv0
+    while lv <= maxLv do
+        local list = {}
+        for s2, r2 in pairs(ids.stats) do
+            if type(r2) == "table" and type(db.items[s2]) == "table"
+                and slot_of(s2) == slot and usable(s2, lv) then
+                local sc2 = score_at(s2, lv)
+                if sc2 ~= nil then
+                    table.insert(list, { serial = s2, sc = sc2 })
+                end
+            end
+        end
+        table.sort(list, function(x, y)
+            if x.sc ~= y.sc then return x.sc > y.sc end
+            return x.serial < y.serial
+        end)
+
+        local mine = 0
+        local i = 1
+        while i <= cap and i <= #list do
+            if list[i].serial == key then mine = i end
+            i = i + 1
+        end
+        if mine > 0 then
+            table.insert(wins, lv)
+            if not haveMargin then
+                haveMargin = true
+                local disp = list[cap + 1]
+                if type(disp) == "table" then
+                    margin = list[mine].sc - disp.sc
+                    local di = db.items[disp.serial]
+                    outName = (type(di) == "table") and di.name
+                        or tostring(disp.serial)
+                else
+                    margin = list[mine].sc
+                    outName = "an empty slot"
+                end
+            end
+        end
+        lv = lv + step
+    end
+
+    db.items[key] = nil
+    ids.stats[key] = nil
+
+    local sampled = math.floor((maxLv - lv0) / step) + 1
+    if #wins == 0 then
+        utilprint("$w  $Knever beats what you already own for " .. slot
+            .. " (" .. sampled .. " levels sampled) - save the gold.$w")
+        return
+    end
+
+    -- compress 50,60,70,120 into "50-70 120"
+    local runs = {}
+    local runStart = wins[1]
+    local prev = wins[1]
+    local i2 = 2
+    while i2 <= #wins + 1 do
+        local v = wins[i2]
+        if v ~= nil and v == prev + step then
+            prev = v
+        else
+            if runStart == prev then
+                table.insert(runs, tostring(runStart))
+            else
+                table.insert(runs, runStart .. "-" .. prev)
+            end
+            runStart, prev = v, v
+        end
+        i2 = i2 + 1
+    end
+
+    utilprint("$w  best in " .. slot .. " at $Glevels "
+        .. table.concat(runs, " ") .. "$w (" .. #wins .. " of " .. sampled
+        .. " sampled)")
+    utilprint("$w  first displaces $C" .. outName .. "$w by $G+"
+        .. string.format("%.2f", margin) .. "$w points")
+    utilprint("$K  worth bidding if the price fits; dual-wield pairing is "
+        .. "not considered here.$w")
+end
+
+---
 -- setup
 ---
 
@@ -4347,6 +4502,51 @@ function init()
                             .. " sampled levels)")
                     end
                 end
+            end
+
+        elseif string.sub(low, 1, 6) == "covet " or low == "covet" then
+            --[[
+                dinv's covet: hand it an auction number, it asks the
+                auctioneer (bid under 1000, lbid for the market), ranks
+                the item against your own gear and answers "worth
+                bidding?" without storing anything.
+            ]]
+            local body = trim(string.sub(low, 6))
+            local sp = pfind(body, " ")
+            local numTxt = (sp ~= nil) and string.sub(body, 1, sp - 1) or body
+            local num = tonumber(numTxt)
+            local stp = (sp ~= nil) and tonumber(trim(string.sub(body, sp + 1))) or nil
+            if num == nil or num < 1 then
+                utilprint(TAG .. "usage: /awinv covet <auction#> [level step] - "
+                    .. "is that auction worth bidding on? Under 1000 asks the "
+                    .. "auction, 1000+ asks the market.")
+            elseif ids.pending ~= "" or #ids.q > 0 then
+                utilprint(TAGR .. "the identify queue is busy - try again in "
+                    .. "a moment.")
+            else
+                num = math.floor(num)
+                covet.num = num
+                covet.step = (stp ~= nil and stp >= 1) and math.floor(stp) or 10
+                ids.pending = "@bid"
+                id_trigs(true)
+                if num < 1000 then
+                    send("bid " .. num)
+                else
+                    send("lbid " .. num)
+                end
+                id_guard_off()
+                ids.guard = later(10000, function()
+                    ids.guard = nil
+                    if ids.pending == "@bid" and type(ids.rec) ~= "table" then
+                        ids.pending = ""
+                        id_trigs(false)
+                        covet.num = 0
+                        utilprint(TAGR .. "no answer for auction #" .. num
+                            .. " - wrong number, already sold, or the "
+                            .. "market is closed.")
+                    end
+                end)
+                utilprint(TAG .. "asking about auction #" .. num .. "...")
             end
 
         elseif low == "stats" then
@@ -5096,6 +5296,7 @@ function init()
             utilprint("$w  /awinv ignore on|off <serial>      leave a bag alone")
             utilprint("$w  /awinv organize add <bag> <query>  teach a bag what it takes")
             utilprint("$w  /awinv organize run        file everything carried")
+            utilprint("$w  /awinv covet <auction#>    is that auction worth bidding on?")
             utilprint("$w  /awinv weapon [type]       weapons ranked by damage type, plus the dual-wield pick")
             utilprint("$w  /awinv weapon wish         toggle the Weapons wish (skip skill gating)")
             utilprint("$w  /awinv consume add <name> <keyword>   name a potion you buy")

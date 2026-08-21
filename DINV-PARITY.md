@@ -2,7 +2,7 @@
 
 Measured against Durel's original (18,804 lines) from a full four-part read of
 its command surface, item engine, scoring engine and QoL modules. dinv's own
-command names are in brackets. Current: aw-inv 3.4.0.
+command names are in brackets. Current: aw-inv 3.5.0.
 
 ---
 
@@ -51,7 +51,7 @@ command names are in brackets. Current: aw-inv 3.4.0.
 | Optimal set per level | `analyze` | **Done, simplified** &mdash; `/awinv analyze [step]` sweeps in the background. Ours re-ranks per level; dinv additionally anneals stat handicaps, which sharpens results when several stats sit at their ceiling. |
 | Where is this item used | `usage` | **Done** &mdash; `/awinv usage <query>`, and `/awinv plan <slot>` for one slot's upgrade path. |
 | What is this item worth | `compare` | **Partly** &mdash; `/awinv compare <item>` reports the levels it wins and its score; it does not re-run the sweep without the item to diff stat totals. |
-| Should I bid on this | `covet` | Not ported &mdash; needs auction scraping. |
+| Should I bid on this | `covet` | **Done (3.5.0)** &mdash; `/awinv covet <auction#>` sends `bid`/`lbid` (dinv never scraped the channel either), captures the identify box under a sentinel, ranks the item per level for its slot, reports the winning level ranges and the displaced incumbent, stores nothing. |
 
 ### C. Bigger subsystems
 
