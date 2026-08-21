@@ -2,7 +2,7 @@
 
 Measured against Durel's original (18,804 lines) from a full four-part read of
 its command surface, item engine, scoring engine and QoL modules. dinv's own
-command names are in brackets. Current: aw-inv 3.5.0.
+command names are in brackets. Current: aw-inv 3.6.0.
 
 ---
 
@@ -39,7 +39,7 @@ command names are in brackets. Current: aw-inv 3.5.0.
 | Saved outfits | `snapshot` | **Done** &mdash; `/awinv snap save\|wear\|del`. |
 | Ignored containers | `ignore` | **Done** &mdash; `/awinv ignore on\|off\|list`, honoured by ranking and search. |
 | Return items home | `store` | **Done** &mdash; `/awinv store <query>`, using the bag an item was last found in. |
-| Auto-refresh interval | `refresh on\|off\|eager <min>` | On/off only; no period or eager mode. |
+| Auto-refresh interval | `refresh on\|off\|eager <min>` | **Done (3.6.0)** &mdash; `/awinv refresh every <min>` rescans on a clock, skipped while ids or scans are mid-flight. The invmon debounce already covers dinv&rsquo;s eager mode (new item &rarr; refresh in seconds). |
 | Verbosity | `notify` | Not ported. |
 | Report to channel | `report <chan> item\|set` | Not ported. |
 
@@ -48,9 +48,9 @@ command names are in brackets. Current: aw-inv 3.5.0.
 | Feature | dinv | Status |
 |---|---|---|
 | Stat ceilings | `statBonus` | **Done** &mdash; `/awinv stats` parses the Spells Bonus row and averages per level; seeded until then. |
-| Optimal set per level | `analyze` | **Done, simplified** &mdash; `/awinv analyze [step]` sweeps in the background. Ours re-ranks per level; dinv additionally anneals stat handicaps, which sharpens results when several stats sit at their ceiling. |
+| Optimal set per level | `analyze` | **Done (3.6.0, annealed)** &mdash; the sweep now anneals stat handicaps exactly as dinv does (intensity 8, delta 1/8, 80% cutoff), and scores each level with that level&rsquo;s weights and ceilings &mdash; the old sweep scored every level at the current level. |
 | Where is this item used | `usage` | **Done** &mdash; `/awinv usage <query>`, and `/awinv plan <slot>` for one slot's upgrade path. |
-| What is this item worth | `compare` | **Partly** &mdash; `/awinv compare <item>` reports the levels it wins and its score; it does not re-run the sweep without the item to diff stat totals. |
+| What is this item worth | `compare` | **Done (3.6.0)** &mdash; also ranks the slot with the item excluded: what steps in, and the point loss at your level. |
 | Should I bid on this | `covet` | **Done (3.5.0)** &mdash; `/awinv covet <auction#>` sends `bid`/`lbid` (dinv never scraped the channel either), captures the identify box under a sentinel, ranks the item per level for its slot, reports the winning level ranges and the displaced incumbent, stores nothing. |
 
 ### C. Bigger subsystems
@@ -60,7 +60,7 @@ command names are in brackets. Current: aw-inv 3.5.0.
 | Weapon sets | `weapon <types>`, `weapon next` | **Mostly done (3.4.0)** &mdash; dual-wield pairing in the set builder (offhand ≤ ½ primary weight, `soldier` waiver, offhand_dam scoring, pair-vs-shield+hold decision, Gloves of Dexterity), weapon-skill gating from dinv’s ability table with a Weapons-wish toggle. `weapon next` cycling not ported. |
 | Consumable shops | `consume buy\|small\|big` | **Done (3.3.0)** &mdash; `/awinv consume shop` records entries at the shopkeeper via appraise (dinv has no built-in shop DB either), `buy` walks there with walkTo + GMCP arrival polling, `small`/`big` drink lowest/highest usable, 10-per-burst cap. |
 | Container rules | `organize` | Per-container queries plus a sweep that files matching items automatically. |
-| Priority CRUD | `priority create\|clone\|copy\|paste\|compare` | We can list, switch, set weights, delete. No cloning, clipboard sharing, or comparing two priorities' output. |
+| Priority CRUD | `priority create\|clone\|copy\|paste\|compare` | **Done (3.2.0&ndash;3.6.0)** &mdash; clone, copy prints a shareable `stat=w` line, paste reads it back, compare diffs the two profiles&rsquo; actual picks per slot. |
 
 ### D. Eligibility filters
 

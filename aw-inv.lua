@@ -77,7 +77,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "3.5.0",
+    version     = "3.6.0",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -123,6 +123,9 @@ local cfg = {
     -- the Weapons wish waives weapon-skill gating; we can't read the wish
     -- list, so '/awinv weapon wish' toggles it by hand
     weapwish = false,
+    -- '/awinv refresh every <min>': a rescan on a clock, dinv's timed
+    -- refresh (its default was 5). 0 = off; invmon debouncing is separate.
+    autoMin = 0,
 }
 
 --[[
@@ -170,6 +173,7 @@ local st = {
     buildAfter = false,  -- /awinv build: identify everything once scans finish
     scanRows = 0,        -- rows this scan has produced; gates the prompt-close
     scanSeq = 0,         -- scan token, so a grace timer can't close a later scan
+    everyTimer = false,  -- '/awinv refresh every <min>' clock; false = unarmed
 }
 
 -- every trigger id this plugin registers, so cleanup can release them.
@@ -791,7 +795,7 @@ local function save_cfg()
     saveTable("aw_inv_cfg", {
         gag = cfg.gag, auto = cfg.auto, serials = cfg.serials,
         fpx = cfg.fpx, fov = cfg.fov, ignored = cfg.ignored,
-        weapwish = cfg.weapwish,
+        weapwish = cfg.weapwish, autoMin = cfg.autoMin,
     })
 end
 
@@ -1764,7 +1768,12 @@ local function weights_at(name, level)
     return best
 end
 
-local function score_at(serial, level)
+--[[
+    handicap is dinv's annealing device: a per-stat NEGATIVE offset added
+    to the six cappable stats' weights while hunting for alternative sets
+    once a stat pins at its ceiling. nil for every ordinary call.
+]]
+local function score_at(serial, level, handicap)
     local r = ids.stats[serial]
     if type(r) ~= "table" then return nil end
     local ws = weights_at(prof.active, level)
@@ -1772,11 +1781,16 @@ local function score_at(serial, level)
 
     local total = 0
     for stat, weight in pairs(ws) do
+        local w2 = weight
+        if type(handicap) == "table" then
+            local h = tonumber(handicap[stat])
+            if h ~= nil and h ~= 0 then w2 = w2 + h end
+        end
         local v = tonumber(r[stat])
         if v ~= nil then
-            total = total + v * weight
+            total = total + v * w2
         elseif r["aff_" .. stat] == 1 then
-            total = total + weight
+            total = total + w2
         end
     end
 
@@ -1964,7 +1978,7 @@ end
     with capacity two lists two. Returns rows already sorted for render:
     { slot, serial, score, worn } — worn meaning currently on your body.
 ]]
-local function best_set(level)
+local function best_set(level, handicap)
     local per = {}    -- slot -> array of {serial=..., sc=...}
 
     for serial, r in pairs(ids.stats) do
@@ -1980,7 +1994,10 @@ local function best_set(level)
                     what those pieces carry. "Nothing better exists" is an
                     answer; a missing slot is not.
                 ]]
-                local sc = score_of(serial)
+                -- scored AT the target level: the sweep used to score
+                -- every level with current-level weights and ceilings,
+                -- which made the level axis of analyze a fiction
+                local sc = score_at(serial, level, handicap)
                 if sc ~= nil then
                     if type(per[slot]) ~= "table" then per[slot] = {} end
                     table.insert(per[slot], { serial = serial, sc = sc })
@@ -2138,6 +2155,62 @@ local function best_set(level)
     return out
 end
 
+--[[
+    dinv's annealing, inv.set.createCR: once a stat's set total pins at
+    its ceiling, more of it is worthless — so that stat's weight gets a
+    cumulative handicap and the set is rebuilt, keeping whichever
+    candidate scores best under the TRUE weights. Up to 8 iterations at
+    delta 1/8, cut off when a candidate slides under 80% of the best —
+    dinv's own numbers (analyzeIntensity = 8).
+]]
+local function anneal_set(level)
+    local rows = best_set(level, nil)
+    local hc = { str = 0, intel = 0, wis = 0, dex = 0, con = 0, luck = 0 }
+
+    local function judge(list)
+        local tot = 0
+        local sums = { str = 0, intel = 0, wis = 0, dex = 0, con = 0, luck = 0 }
+        for _, e in ipairs(list) do
+            local ts = score_at(e.serial, level)
+            if ts ~= nil then tot = tot + ts end
+            local r2 = ids.stats[e.serial]
+            if type(r2) == "table" then
+                for _, st in ipairs(STAT6) do
+                    local v = tonumber(r2[st])
+                    if v ~= nil then sums[st] = sums[st] + v end
+                end
+            end
+        end
+        return tot, sums
+    end
+
+    local bestRows = rows
+    local bestScore, sums = judge(rows)
+
+    local iter = 0
+    while iter < 8 do
+        local over = false
+        for _, st in ipairs(STAT6) do
+            local ceil = stat_ceiling(level, st)
+            if type(ceil) == "number" and ceil > 0 and sums[st] >= ceil then
+                hc[st] = hc[st] - 0.125
+                over = true
+            end
+        end
+        if not over then break end
+
+        local cand = best_set(level, hc)
+        local candScore, candSums = judge(cand)
+        if candScore > bestScore then
+            bestRows, bestScore = cand, candScore
+        end
+        if candScore < bestScore * 0.8 then break end
+        sums = candSums
+        iter = iter + 1
+    end
+    return bestRows
+end
+
 ---
 -- analysis: what you would wear at every level
 --
@@ -2174,10 +2247,11 @@ end
 local function ana_step()
     if ana.busy ~= true then return end
 
-    -- one slice per tick keeps the client responsive on a big wardrobe
+    -- annealing multiplies the work per level up to 8x, so the slice
+    -- shrinks from six levels a tick to two to stay responsive
     local done = 0
-    while done < 6 and ana.at <= ana.max do
-        for _, e in ipairs(best_set(ana.at)) do
+    while done < 2 and ana.at <= ana.max do
+        for _, e in ipairs(anneal_set(ana.at)) do
             ana.rows[ana_key(ana.at, e.slot)] = e.serial
         end
         ana.at = ana.at + ana.step
@@ -3409,6 +3483,30 @@ local function refresh(withVault)
 end
 
 --[[
+    dinv's timed refresh: a rescan every N minutes, skipped while the id
+    pass or a scan is mid-flight so it never interleaves into an open
+    box. The invmon debounce already covers "something changed"; this
+    covers the changes invmon never announces (timers running out,
+    containers filled by someone else).
+]]
+local arm_every = nil
+arm_every = function()
+    if st.everyTimer ~= false and st.everyTimer ~= nil then
+        pcall(removeTimer, st.everyTimer)
+    end
+    st.everyTimer = false
+    if cfg.autoMin < 1 then return end
+    st.everyTimer = later(cfg.autoMin * 60000, function()
+        st.everyTimer = false
+        if ids.pending == "" and #ids.q == 0 and st.inBlock == ""
+            and #st.scanQ == 0 then
+            refresh(false)
+        end
+        arm_every()
+    end)
+end
+
+--[[
     {invmon} says the inventory changed. One debounced refresh follows the
     burst rather than a rescan per item; a floor keeps a long fight from
     turning into a rescan every debounce. The clock is a counter of debounce
@@ -3881,6 +3979,8 @@ function init()
         if saved.serials == false then cfg.serials = false end
         if type(saved.ignored) == "string" then cfg.ignored = saved.ignored end
         if saved.weapwish == true then cfg.weapwish = true end
+        local am = tonumber(saved.autoMin)
+        if am ~= nil and am >= 1 and am <= 120 then cfg.autoMin = math.floor(am) end
         local fp = tonumber(saved.fpx)
         if fp ~= nil and fp >= 6 and fp <= 48 then cfg.fpx = math.floor(fp) end
         fp = tonumber(saved.fov)
@@ -3896,6 +3996,7 @@ function init()
     load_rules()
     load_cons()
     load_cshop()
+    arm_every()
 
     --[[
         Say what came back. Persistence failing silently is how a session's
@@ -4172,10 +4273,31 @@ function init()
             end
             db.items["999999001"] = nil
 
-        elseif low == "refresh" then
-            refresh(false)
-            utilprint(TAG .. "rescanning eq, inventory, containers and keyring...")
-            showWidget(widget)
+        elseif low == "refresh" or string.sub(low, 1, 8) == "refresh " then
+            local sub2 = trim(string.sub(low, 8))
+            if string.sub(sub2, 1, 6) == "every " then
+                local m = tonumber(trim(string.sub(sub2, 7)))
+                if m == nil or m < 1 or m > 120 then
+                    utilprint(TAGR .. "usage: /awinv refresh every <1-120> "
+                        .. "(minutes) | refresh off | refresh")
+                else
+                    cfg.autoMin = math.floor(m)
+                    save_cfg()
+                    arm_every()
+                    utilprint(TAG .. "rescanning every " .. cfg.autoMin
+                        .. " minute(s); '/awinv refresh off' stops the clock.")
+                end
+            elseif sub2 == "off" then
+                cfg.autoMin = 0
+                save_cfg()
+                arm_every()
+                utilprint(TAG .. "timed rescans off. The invmon-driven "
+                    .. "refresh is separate ('/awinv auto').")
+            else
+                refresh(false)
+                utilprint(TAG .. "rescanning eq, inventory, containers and keyring...")
+                showWidget(widget)
+            end
 
         elseif string.sub(low, 1, 5) == "find " or low == "find" then
             -- the query language against the index, printed, not filtered
@@ -4305,7 +4427,8 @@ function init()
             ]]
             local lvArg = tonumber(trim(string.sub(low, 5)))
             local lv = (lvArg ~= nil) and math.floor(lvArg) or char_level()
-            local rows = best_set(lv)
+            -- annealed: a one-shot command can afford the better answer
+            local rows = anneal_set(lv)
             if #rows == 0 then
                 utilprint(TAGR .. "nothing to wear - identify your gear first "
                     .. "('/awinv build').")
@@ -4500,6 +4623,49 @@ function init()
                         utilprint("$w  best in slot at $Glevels " .. ana_ranges(lv)
                             .. "$w (" .. #lv .. " of " .. math.floor(ana.max / ana.step)
                             .. " sampled levels)")
+
+                        --[[
+                            The diff half of dinv's compare: rank the slot
+                            fresh with this serial excluded — what steps
+                            in, and what the loss costs at your level.
+                        ]]
+                        local slot = slot_of(serial)
+                        if slot ~= "" then
+                            local lvNow = char_level()
+                            local list = {}
+                            for s2, r2 in pairs(ids.stats) do
+                                if s2 ~= serial and type(r2) == "table"
+                                    and type(db.items[s2]) == "table"
+                                    and slot_of(s2) == slot
+                                    and usable(s2, lvNow) then
+                                    local sc2 = score_at(s2, lvNow)
+                                    if sc2 ~= nil then
+                                        table.insert(list, { serial = s2, sc = sc2 })
+                                    end
+                                end
+                            end
+                            table.sort(list, function(x, y)
+                                if x.sc ~= y.sc then return x.sc > y.sc end
+                                return x.serial < y.serial
+                            end)
+                            local cap = tonumber(SLOT_CAP[slot])
+                            if cap == nil or cap < 1 then cap = 1 end
+                            local nxt = list[cap]
+                            if type(nxt) == "table" then
+                                local ni = db.items[nxt.serial]
+                                local loss = 0
+                                if sc ~= nil then loss = sc - nxt.sc end
+                                utilprint("$w  without it: $C"
+                                    .. ((type(ni) == "table") and ni.name or nxt.serial)
+                                    .. "$w steps in at " .. tostring(nxt.sc)
+                                    .. " ($R-" .. string.format("%.2f", loss)
+                                    .. "$w at level " .. lvNow .. ")")
+                            else
+                                utilprint("$w  without it the " .. slot
+                                    .. " slot sits $Rempty$w at level "
+                                    .. lvNow .. ".")
+                            end
+                        end
                     end
                 end
             end
@@ -5078,6 +5244,142 @@ function init()
                         .. "'/awinv prio set " .. dst .. " <stat> <weight>'.")
                 end
 
+            elseif string.sub(restLow, 1, 5) == "copy " then
+                --[[
+                    dinv put the profile on the Windows clipboard; there is
+                    no clipboard API here, so it prints one selectable line
+                    instead. The format is exactly what 'paste' reads.
+                ]]
+                local name = trim(string.sub(restLow, 6))
+                local ws = prof.sets[name]
+                if type(ws) ~= "table" then
+                    utilprint(TAGR .. "no profile named '" .. name .. "'.")
+                else
+                    local kv = {}
+                    for k, v in pairs(ws) do
+                        table.insert(kv, tostring(k) .. "=" .. tostring(v))
+                    end
+                    table.sort(kv)
+                    utilprint(TAG .. "shareable - anyone runs '/awinv prio paste "
+                        .. name .. " <the rest>':")
+                    utilprint("$w  " .. name .. " " .. table.concat(kv, " "))
+                end
+
+            elseif string.sub(restLow, 1, 6) == "paste " then
+                local body = trim(string.sub(restLow, 7))
+                local sp2 = pfind(body, " ")
+                if sp2 == nil then
+                    utilprint(TAGR .. "usage: /awinv prio paste <name> stat=w stat=w ...")
+                else
+                    local name = string.gsub(string.sub(body, 1, sp2 - 1),
+                        "[^a-z0-9_@.-]", "")
+                    local blob = trim(string.sub(body, sp2 + 1))
+                    local ws = {}
+                    local nSet = 0
+                    for pair in string.gmatch(blob, "[^ ]+") do
+                        local eq2 = pfind(pair, "=")
+                        if eq2 ~= nil and eq2 > 1 then
+                            local v = tonumber(string.sub(pair, eq2 + 1))
+                            if v ~= nil and v ~= 0 then
+                                ws[string.sub(pair, 1, eq2 - 1)] = v
+                                nSet = nSet + 1
+                            end
+                        end
+                    end
+                    if name == "" or nSet == 0 then
+                        utilprint(TAGR .. "nothing usable in that paste.")
+                    else
+                        prof.sets[name] = ws
+                        save_prof()
+                        render()
+                        utilprint(TAG .. "'" .. name .. "' created with " .. nSet
+                            .. " weight(s). '/awinv prio use " .. name
+                            .. "' scores with it.")
+                    end
+                end
+
+            elseif string.sub(restLow, 1, 8) == "compare " then
+                --[[
+                    Two profiles, one wardrobe: build the best set under
+                    each and show every slot where the pick changes.
+                    dinv diffs its cached analyses; ranking fresh at your
+                    level answers the same question without the cache.
+                ]]
+                local body = trim(string.sub(restLow, 9))
+                local sp2 = pfind(body, " ")
+                local n1 = (sp2 ~= nil) and string.sub(body, 1, sp2 - 1) or ""
+                local n2 = (sp2 ~= nil) and trim(string.sub(body, sp2 + 1)) or ""
+                if type(prof.sets[n1]) ~= "table"
+                    or type(prof.sets[n2]) ~= "table" then
+                    utilprint(TAGR .. "usage: /awinv prio compare <a> <b> - "
+                        .. "both must exist ('/awinv prio list').")
+                else
+                    local keep = prof.active
+                    local lvNow = char_level()
+                    prof.active = n1
+                    local rowsA = best_set(lvNow)
+                    prof.active = n2
+                    local rowsB = best_set(lvNow)
+                    prof.active = keep
+
+                    local function pickmap(rows)
+                        local m = {}
+                        local tot = 0
+                        for _, e in ipairs(rows) do
+                            local cur = m[e.slot]
+                            if type(cur) ~= "string" then cur = "" end
+                            m[e.slot] = cur .. ((cur ~= "") and "," or "")
+                                .. e.serial
+                            tot = tot + e.sc
+                        end
+                        return m, tot
+                    end
+                    local mapA, totA = pickmap(rowsA)
+                    local mapB, totB = pickmap(rowsB)
+
+                    local names = function(csv)
+                        local out2 = {}
+                        for s2 in string.gmatch(tostring(csv or "empty"), "[^,]+") do
+                            local it2 = db.items[s2]
+                            table.insert(out2,
+                                (type(it2) == "table") and it2.name or s2)
+                        end
+                        return table.concat(out2, " + ")
+                    end
+
+                    utilprint(TAG .. n1 .. " vs " .. n2 .. " at level " .. lvNow
+                        .. " - set scores " .. string.format("%.0f", totA)
+                        .. " vs " .. string.format("%.0f", totB) .. ":")
+                    local allSlots = {}
+                    local seen2 = {}
+                    for slot, _ in pairs(mapA) do
+                        if seen2[slot] ~= true then
+                            seen2[slot] = true
+                            table.insert(allSlots, slot)
+                        end
+                    end
+                    for slot, _ in pairs(mapB) do
+                        if seen2[slot] ~= true then
+                            seen2[slot] = true
+                            table.insert(allSlots, slot)
+                        end
+                    end
+                    table.sort(allSlots)
+                    local nDiff = 0
+                    for _, slot in ipairs(allSlots) do
+                        if mapA[slot] ~= mapB[slot] then
+                            nDiff = nDiff + 1
+                            utilprint("$w  " .. slot .. ": $C"
+                                .. names(mapA[slot]) .. "$w vs $C"
+                                .. names(mapB[slot]) .. "$w")
+                        end
+                    end
+                    if nDiff == 0 then
+                        utilprint("$w  same picks in every slot - the weights "
+                            .. "differ, the wardrobe doesn't care.")
+                    end
+                end
+
             elseif string.sub(restLow, 1, 4) == "del " then
                 local name = trim(string.sub(restLow, 5))
                 if type(prof.sets[name]) == "table" and name ~= prof.active then
@@ -5089,7 +5391,9 @@ function init()
                         .. "' (missing, or the active profile).")
                 end
             else
-                utilprint(TAG .. "usage: /awinv prio [list] | use <name> | set <name> <stat> <w> | del <name>")
+                utilprint(TAG .. "usage: /awinv prio [list] | use <name> | set <name> <stat> <w> "
+                    .. "| clone <from> <to> | copy <name> | paste <name> <line> "
+                    .. "| compare <a> <b> | del <name>")
             end
 
         elseif string.sub(low, 1, 4) == "use " then
@@ -5297,6 +5601,8 @@ function init()
             utilprint("$w  /awinv organize add <bag> <query>  teach a bag what it takes")
             utilprint("$w  /awinv organize run        file everything carried")
             utilprint("$w  /awinv covet <auction#>    is that auction worth bidding on?")
+            utilprint("$w  /awinv refresh every <min> rescan on a clock; 'refresh off' stops it")
+            utilprint("$w  /awinv prio copy|paste|compare   share profiles, diff two profiles' picks")
             utilprint("$w  /awinv weapon [type]       weapons ranked by damage type, plus the dual-wield pick")
             utilprint("$w  /awinv weapon wish         toggle the Weapons wish (skip skill gating)")
             utilprint("$w  /awinv consume add <name> <keyword>   name a potion you buy")
@@ -5347,4 +5653,9 @@ function cleanup()
     if ids.timer ~= nil then pcall(removeTimer, ids.timer); ids.timer = nil end
     if ids.guard ~= nil then pcall(removeTimer, ids.guard); ids.guard = nil end
     if qol.watchTimer ~= nil then pcall(removeTimer, qol.watchTimer); qol.watchTimer = nil end
+    if st.everyTimer ~= false and st.everyTimer ~= nil then
+        pcall(removeTimer, st.everyTimer)
+        st.everyTimer = false
+    end
+    if cshop.poll ~= nil then pcall(removeTimer, cshop.poll); cshop.poll = nil end
 end
