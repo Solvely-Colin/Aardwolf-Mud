@@ -77,7 +77,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "3.3.0",
+    version     = "3.4.0",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -120,6 +120,9 @@ local cfg = {
     -- not moved. Declared, because an unset field here is undefined and
     -- undefined is truthy on this runtime.
     ignored = "",
+    -- the Weapons wish waives weapon-skill gating; we can't read the wish
+    -- list, so '/awinv weapon wish' toggles it by hand
+    weapwish = false,
 }
 
 --[[
@@ -788,6 +791,7 @@ local function save_cfg()
     saveTable("aw_inv_cfg", {
         gag = cfg.gag, auto = cfg.auto, serials = cfg.serials,
         fpx = cfg.fpx, fov = cfg.fov, ignored = cfg.ignored,
+        weapwish = cfg.weapwish,
     })
 end
 
@@ -1843,6 +1847,53 @@ end
 ---
 
 --[[
+    dinv's dbot.ability table, verbatim: the level at which each class
+    gains each weapon skill. An absent class can never use that type.
+    char.base.classes over GMCP is a digit string, one digit per class
+    the character has remorted through, and any of them counts.
+]]
+local ABILITY_CLASS = {
+    ["0"] = "mag", ["1"] = "cle", ["2"] = "thi", ["3"] = "war",
+    ["4"] = "ran", ["5"] = "pal", ["6"] = "psi",
+}
+local ABILITY = {
+    dualwield = { mag = 201, cle = 201, thi = 29, war = 32, ran = 25, pal = 35, psi = 201 },
+    axe       = { war = 2, ran = 1 },
+    bow       = { ran = 1 },
+    dagger    = { mag = 1, thi = 1, war = 4, ran = 5, psi = 10 },
+    flail     = { cle = 5, war = 7, pal = 1, psi = 11 },
+    hammer    = { war = 1 },
+    mace      = { cle = 1, thi = 10, war = 5, pal = 6, psi = 5 },
+    polearm   = { war = 7, ran = 13, pal = 10 },
+    spear     = { mag = 1, war = 10, ran = 11, pal = 11 },
+    sword     = { war = 1, ran = 2, pal = 2 },
+    whip      = { mag = 5, cle = 10, thi = 3, war = 9, ran = 18, pal = 1, psi = 1 },
+    exotic    = { mag = 1, cle = 1, thi = 1, war = 1, ran = 1, pal = 1, psi = 1 },
+}
+
+--[[
+    Does any of the character's classes have this skill at this level?
+    Unknown skill names and silent GMCP both fail OPEN — a wrong "yes"
+    costs one refused wield; a wrong "no" silently hides gear.
+]]
+local function ability_at(name, level)
+    local tab = ABILITY[name]
+    if type(tab) ~= "table" then return true end
+    local classes = tostring(gfield(getGMCPData("char.base"), "classes") or "")
+    if classes == "" or classes == "null" or classes == "undefined" then
+        return true
+    end
+    for d in string.gmatch(classes, "[0-6]") do
+        local cn = ABILITY_CLASS[d]
+        if type(cn) == "string" then
+            local lv = tab[cn]
+            if type(lv) == "number" and level >= lv then return true end
+        end
+    end
+    return false
+end
+
+--[[
     dinv rejects gear the character cannot use before ranking it, so the
     list never recommends something you would be refused. Alignment
     restrictions and heroonly are carried in the identify Flags field.
@@ -1879,6 +1930,22 @@ local function usable(serial, level)
         if pfind(it.where, "c:") == 1 then
             local con = string.sub(it.where, 3)
             if pfind(" " .. cfg.ignored .. " ", " " .. con .. " ") ~= nil then
+                return false
+            end
+        end
+    end
+
+    --[[
+        A weapon whose type no class of yours can wield is not gear, it
+        is luggage — dinv gates on the ability table before ranking. The
+        Weapons wish waives every weapon skill; we can't see the wish
+        list, so '/awinv weapon wish' records that you have it. A weapon
+        with no Weapon Type field is never gated (dinv's rule too).
+    ]]
+    if cfg.weapwish ~= true and slot_of(serial) == "wield" then
+        local wt = r.weapon_type
+        if type(wt) == "string" and wt ~= "" then
+            if not ability_at(string.lower(trim(wt)), level) then
                 return false
             end
         end
@@ -1933,22 +2000,133 @@ local function best_set(level)
     end
     table.sort(slots)
 
+    --[[
+        The wield slot is not "top two". An offhand needs dual wield —
+        the class table at this level, or Aardwolf Gloves of Dexterity
+        sitting in the set's own hands pick — and must weigh at most
+        half the primary (soldier subclass excepted). It scores with
+        offhand_dam in place of ave_dam. And the pair only takes both
+        hands if it beats primary + shield + hold, dinv's own decision
+        in inv.set.createWithHandicap.
+    ]]
+    local dualPick = nil
+    local wields = per.wield
+    if type(wields) == "table" and wields[2] ~= nil then
+        local ws2 = weights_at(prof.active, level)
+        local banned = false
+        if type(ws2) == "table" then
+            local b = tonumber(ws2["~second"])
+            banned = (b ~= nil and b ~= 0)
+        end
+
+        local dual = false
+        if not banned then
+            dual = ability_at("dualwield", level)
+            if not dual and type(per.hands) == "table" and per.hands[1] ~= nil then
+                local hit = db.items[per.hands[1].serial]
+                if type(hit) == "table" and pfind(string.lower(tostring(hit.name or "")),
+                        "aardwolf gloves of dexterity") ~= nil then
+                    dual = true
+                end
+            end
+        end
+
+        if dual then
+            local wAve = 0
+            local wOff = 0
+            if type(ws2) == "table" then
+                local n1 = tonumber(ws2.ave_dam)
+                if n1 ~= nil then wAve = n1 end
+                local n2 = tonumber(ws2.offhand_dam)
+                if n2 ~= nil then wOff = n2 end
+            end
+            local function off_score(entry)
+                local r2 = ids.stats[entry.serial]
+                local ad = 0
+                if type(r2) == "table" then ad = num_or(r2.ave_dam, 0) end
+                return entry.sc - ad * wAve + ad * wOff
+            end
+            local function weight_of(entry)
+                local r2 = ids.stats[entry.serial]
+                if type(r2) ~= "table" then return nil end
+                local n = tonumber(r2.weight)
+                return n
+            end
+            local sub = string.lower(tostring(gfield(getGMCPData("char.base"),
+                "subclass") or ""))
+
+            local bestPair = nil
+            local bestSum = 0
+            for _, p in ipairs(wields) do
+                for _, o in ipairs(wields) do
+                    if p.serial ~= o.serial then
+                        local okw = (sub == "soldier")
+                        if not okw then
+                            local pw = weight_of(p)
+                            local ow = weight_of(o)
+                            okw = (pw ~= nil and ow ~= nil and pw >= ow * 2)
+                        end
+                        if okw then
+                            local osc = off_score(o)
+                            if p.sc + osc > bestSum then
+                                bestSum = p.sc + osc
+                                bestPair = { p = p, o = o, osc = osc }
+                            end
+                        end
+                    end
+                end
+            end
+
+            if bestPair ~= nil then
+                local alt = wields[1].sc
+                if type(per.shield) == "table" and per.shield[1] ~= nil then
+                    alt = alt + per.shield[1].sc
+                end
+                if type(per.hold) == "table" and per.hold[1] ~= nil then
+                    alt = alt + per.hold[1].sc
+                end
+                if bestSum > alt then dualPick = bestPair end
+            end
+        end
+    end
+
     local out = {}
     for _, slot in ipairs(slots) do
-        -- an unlisted slot reads undefined, `cap == nil` is false, and
-        -- `1 <= undefined` is false, so the slot silently disappeared
-        local cap = tonumber(SLOT_CAP[slot])
-        if cap == nil or cap < 1 then cap = 1 end
-        local list = per[slot]
-        local i = 1
-        while i <= cap and i <= #list do
-            local e = list[i]
-            local it = db.items[e.serial]
+        if dualPick ~= nil and (slot == "shield" or slot == "hold") then
+            -- both hands are full; nothing to emit for these slots
+        elseif dualPick ~= nil and slot == "wield" then
+            local it1 = db.items[dualPick.p.serial]
             table.insert(out, {
-                slot = slot, serial = e.serial, sc = e.sc,
-                worn = (type(it) == "table" and it.where == "eq"),
+                slot = slot, serial = dualPick.p.serial, sc = dualPick.p.sc,
+                worn = (type(it1) == "table" and it1.where == "eq"),
+                off = false,
             })
-            i = i + 1
+            local it2 = db.items[dualPick.o.serial]
+            table.insert(out, {
+                slot = slot, serial = dualPick.o.serial,
+                sc = tonumber(string.format("%.2f", dualPick.osc)),
+                worn = (type(it2) == "table" and it2.where == "eq"),
+                off = true,
+            })
+        else
+            -- an unlisted slot reads undefined, `cap == nil` is false, and
+            -- `1 <= undefined` is false, so the slot silently disappeared
+            local cap = tonumber(SLOT_CAP[slot])
+            if cap == nil or cap < 1 then cap = 1 end
+            -- without a legal pair one weapon is the legal maximum
+            if slot == "wield" then cap = 1 end
+            local list = per[slot]
+            local i = 1
+            while i <= cap and i <= #list do
+                local e = list[i]
+                local it = db.items[e.serial]
+                table.insert(out, {
+                    slot = slot, serial = e.serial, sc = e.sc,
+                    worn = (type(it) == "table" and it.where == "eq"),
+                    off = false,
+                })
+                i = i + 1
+            end
         end
     end
     return out
@@ -2125,7 +2303,13 @@ local function wear_rows(rows)
             elseif it.where == "key" then
                 send("keyring get " .. e.serial)
             end
-            send("wear " .. e.serial)
+            -- dinv sends 'wear <id> second' for the offhand; plain wear
+            -- would stack it as a swap of the primary instead
+            if e.off == true then
+                send("wear " .. e.serial .. " second")
+            else
+                send("wear " .. e.serial)
+            end
             nOn = nOn + 1
         end
     end
@@ -3541,6 +3725,7 @@ function init()
         if saved.auto == false then cfg.auto = false end
         if saved.serials == false then cfg.serials = false end
         if type(saved.ignored) == "string" then cfg.ignored = saved.ignored end
+        if saved.weapwish == true then cfg.weapwish = true end
         local fp = tonumber(saved.fpx)
         if fp ~= nil and fp >= 6 and fp <= 48 then cfg.fpx = math.floor(fp) end
         fp = tonumber(saved.fov)
@@ -4245,6 +4430,20 @@ function init()
                 Damage Type words.
             ]]
             local want = trim(string.sub(low, 7))
+
+            if want == "wish" then
+                cfg.weapwish = (cfg.weapwish ~= true)
+                save_cfg()
+                if cfg.weapwish == true then
+                    utilprint(TAG .. "Weapons wish recorded - weapon-skill "
+                        .. "gating is off, every type is fair game.")
+                else
+                    utilprint(TAG .. "Weapons wish cleared - rankings only "
+                        .. "offer types a class of yours can wield.")
+                end
+                return
+            end
+
             local pool = {}
             for serial, r in pairs(ids.stats) do
                 if type(r) == "table" and slot_of(serial) == "wield"
@@ -4286,6 +4485,36 @@ function init()
                 end
                 utilprint("$K  '/awinv do wear " .. pool[1].serial
                     .. "' wields the top one.$w")
+
+                --[[
+                    What the set builder would actually put in your hands,
+                    dual wield included — the ranking above is per-weapon,
+                    this is the pairing decision.
+                ]]
+                local prim, offh = nil, nil
+                for _, e in ipairs(best_set(char_level())) do
+                    if e.slot == "wield" then
+                        if e.off == true then offh = e else prim = e end
+                    end
+                end
+                if prim ~= nil and offh ~= nil then
+                    local i1 = db.items[prim.serial]
+                    local i2 = db.items[offh.serial]
+                    utilprint(TAG .. "the set builder dual wields: $C"
+                        .. ((type(i1) == "table") and i1.name or prim.serial)
+                        .. "$w + $C"
+                        .. ((type(i2) == "table") and i2.name or offh.serial)
+                        .. "$w (offhand). '/awinv wear' puts both on.")
+                elseif prim ~= nil then
+                    if ability_at("dualwield", char_level()) then
+                        utilprint("$K  one weapon: no legal offhand beats "
+                            .. "shield + held item (offhand must weigh half "
+                            .. "the primary or less).$w")
+                    else
+                        utilprint("$K  no dual wield at your level - one "
+                            .. "weapon plus shield and held item.$w")
+                    end
+                end
             end
 
         elseif string.sub(low, 1, 7) == "consume" then
@@ -4867,7 +5096,8 @@ function init()
             utilprint("$w  /awinv ignore on|off <serial>      leave a bag alone")
             utilprint("$w  /awinv organize add <bag> <query>  teach a bag what it takes")
             utilprint("$w  /awinv organize run        file everything carried")
-            utilprint("$w  /awinv weapon [type]       weapons ranked by damage type")
+            utilprint("$w  /awinv weapon [type]       weapons ranked by damage type, plus the dual-wield pick")
+            utilprint("$w  /awinv weapon wish         toggle the Weapons wish (skip skill gating)")
             utilprint("$w  /awinv consume add <name> <keyword>   name a potion you buy")
             utilprint("$w  /awinv consume <name>      drink the best one you can use")
             utilprint("$w  /awinv consume shop <name> <kw>   at a shopkeeper: record where to buy")

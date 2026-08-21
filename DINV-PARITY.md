@@ -2,7 +2,7 @@
 
 Measured against Durel's original (18,804 lines) from a full four-part read of
 its command surface, item engine, scoring engine and QoL modules. dinv's own
-command names are in brackets. Current: aw-inv 3.3.0.
+command names are in brackets. Current: aw-inv 3.4.0.
 
 ---
 
@@ -57,7 +57,7 @@ command names are in brackets. Current: aw-inv 3.3.0.
 
 | Feature | dinv | What it needs |
 |---|---|---|
-| Weapon sets | `weapon <types>`, `weapon next` | Damage-type banning, dual-wield pairing (offhand ≤ ½ primary weight, waived for `soldier`), weapon-skill gating from a class/level ability table. |
+| Weapon sets | `weapon <types>`, `weapon next` | **Mostly done (3.4.0)** &mdash; dual-wield pairing in the set builder (offhand ≤ ½ primary weight, `soldier` waiver, offhand_dam scoring, pair-vs-shield+hold decision, Gloves of Dexterity), weapon-skill gating from dinv’s ability table with a Weapons-wish toggle. `weapon next` cycling not ported. |
 | Consumable shops | `consume buy\|small\|big` | **Done (3.3.0)** &mdash; `/awinv consume shop` records entries at the shopkeeper via appraise (dinv has no built-in shop DB either), `buy` walks there with walkTo + GMCP arrival polling, `small`/`big` drink lowest/highest usable, 10-per-burst cap. |
 | Container rules | `organize` | Per-container queries plus a sweep that files matching items automatically. |
 | Priority CRUD | `priority create\|clone\|copy\|paste\|compare` | We can list, switch, set weights, delete. No cloning, clipboard sharing, or comparing two priorities' output. |
@@ -67,9 +67,8 @@ command names are in brackets. Current: aw-inv 3.3.0.
 **Done:** level, `heroonly` under 200, alignment restrictions (anti-good /
 anti-neutral / anti-evil), ignored bags, and `~slot` bans from the profile.
 
-**Not yet:** weapon types the class cannot wield (needs the class/level
-ability table), and portal-slot items without the Portal wish (needs
-`wish list` parsing).
+**Not yet:** portal-slot items without the Portal wish (needs `wish list`
+parsing). Weapon-type gating shipped in 3.4.0.
 
 ## Deliberately not ported
 
