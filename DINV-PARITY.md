@@ -2,7 +2,7 @@
 
 Measured against Durel's original (18,804 lines) from a full four-part read of
 its command surface, item engine, scoring engine and QoL modules. dinv's own
-command names are in brackets. Current: aw-inv 3.1.0.
+command names are in brackets. Current: aw-inv 3.3.0.
 
 ---
 
@@ -58,7 +58,7 @@ command names are in brackets. Current: aw-inv 3.1.0.
 | Feature | dinv | What it needs |
 |---|---|---|
 | Weapon sets | `weapon <types>`, `weapon next` | Damage-type banning, dual-wield pairing (offhand ≤ ½ primary weight, waived for `soldier`), weapon-skill gating from a class/level ability table. |
-| Consumable shops | `consume buy\|small\|big` | Categories with shop rooms and level-sorted items, `mapper goto`, buy N, quaff lowest or highest usable. |
+| Consumable shops | `consume buy\|small\|big` | **Done (3.3.0)** &mdash; `/awinv consume shop` records entries at the shopkeeper via appraise (dinv has no built-in shop DB either), `buy` walks there with walkTo + GMCP arrival polling, `small`/`big` drink lowest/highest usable, 10-per-burst cap. |
 | Container rules | `organize` | Per-container queries plus a sweep that files matching items automatically. |
 | Priority CRUD | `priority create\|clone\|copy\|paste\|compare` | We can list, switch, set weights, delete. No cloning, clipboard sharing, or comparing two priorities' output. |
 

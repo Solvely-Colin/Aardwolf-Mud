@@ -77,7 +77,7 @@
 plugin = {
     id          = "aw-inv",
     name        = "Aardwolf Inventory",
-    version     = "3.2.1",
+    version     = "3.3.0",
     author      = "Catdad",
     description = "Searchable inventory with identify database, gear scoring, best-in-slot, consumables, portals and a regen ring.",
     settings    = { saveState = true },
@@ -368,6 +368,28 @@ local rules = {}
     running-to-shops to you.
 ]]
 local cons = {}
+
+--[[
+    Shop-backed consumable categories, dinv's real consume module. dinv has
+    no built-in shop database: every entry is captured by standing AT the
+    shopkeeper and running 'consume shop <cat> <keyword>' — the room comes
+    from GMCP, the item's level and full name from 'appraise <keyword>'.
+    Entries per category stay sorted ascending by level.
+
+    buy travels there and restocks the best one you can use; small/big
+    drink the lowest/highest usable owned instance (dinv's names).
+]]
+local cshop = {
+    tab     = {},        -- category -> array of { lv, kw, room, full }
+    cat     = "",        -- capture in flight: category
+    kw      = "",        -- capture in flight: keyword
+    buyCat  = "",        -- purchase in flight ("" = idle)
+    buyKw   = "",
+    buyN    = 0,
+    buyRoom = 0,
+    poll    = nil,       -- arrival poll timer
+    waited  = 0,         -- ms spent polling
+}
 
 local qol = {
     regen     = "",
@@ -980,6 +1002,70 @@ local function load_cons()
     end
 end
 
+-- shop categories ride one escaped blob: cat|level|keyword|room|fullname
+-- rows joined by ";". Save writes "-" for a deliberately emptied table so
+-- the seed rows do not resurrect on the next load.
+local function save_cshop()
+    local out = {}
+    for cat, list in pairs(cshop.tab) do
+        if type(list) == "table" then
+            for _, e in ipairs(list) do
+                local kw2 = string.gsub(tostring(e.kw or ""), "[|;]", " ")
+                local fu2 = string.gsub(tostring(e.full or ""), "[|;]", " ")
+                table.insert(out, cat .. "|" .. tostring(e.lv) .. "|" .. kw2
+                    .. "|" .. tostring(e.room) .. "|" .. fu2)
+            end
+        end
+    end
+    local blob = table.concat(out, ";")
+    if blob == "" then blob = "-" end
+    saveTable("aw_inv_cshop", { blob = blob })
+end
+
+local function cshop_add(cat, lv, kw, room, full)
+    if type(cshop.tab[cat]) ~= "table" then cshop.tab[cat] = {} end
+    local list = cshop.tab[cat]
+    for _, e in ipairs(list) do
+        if e.lv == lv and e.kw == kw then
+            e.room, e.full = room, full
+            return
+        end
+    end
+    table.insert(list, { lv = lv, kw = kw, room = room, full = full })
+    table.sort(list, function(x, y) return x.lv < y.lv end)
+end
+
+local function load_cshop()
+    local saved = loadTable("aw_inv_cshop")
+    local blob = ""
+    if type(saved) == "table" and type(saved.blob) == "string" then
+        blob = saved.blob
+    end
+    if blob == "" then
+        -- never saved: seed with dinv's Aylor potion shop basics
+        -- (room 32476, 'runto potion' — dinv's own reset() table)
+        cshop_add("heal", 1, "light relief", 32476, "(!(Light Relief)!)")
+        cshop_add("heal", 20, "serious relief", 32476, "(!(Serious Relief)!)")
+        cshop_add("mana", 1, "lotus rush", 32476, "(!(Lotus Rush)!)")
+        cshop_add("fly", 1, "griff", 32476, "(!(Griffon's Blood)!)")
+        cshop_add("sight", 1, "wolf", 32476, "")
+        return
+    end
+    if blob == "-" then return end
+    for row in string.gmatch(blob, "[^;]+") do
+        local f = {}
+        for part in string.gmatch(row, "[^|]+") do table.insert(f, part) end
+        -- full may be empty, which drops the 5th field from gmatch
+        local lv = tonumber(f[2])
+        local room = tonumber(f[4])
+        if type(f[1]) == "string" and lv ~= nil and type(f[3]) == "string" then
+            cshop_add(trim(f[1]), lv, trim(f[3]),
+                (room ~= nil) and room or 0,
+                (type(f[5]) == "string") and trim(f[5]) or "")
+        end
+    end
+end
+
 local function save_qol()
     saveTable("aw_inv_qol", { regen = qol.regen, regenPrev = qol.regenPrev })
 end
@@ -1297,8 +1383,10 @@ local function id_trigs(onoff)
     end
 end
 
--- forward-declared: id_store schedules the next send
+-- forward-declared: id_store schedules the next send; the shop-capture
+-- handler lives with the consume machinery far below
 local id_next = nil
+local cshop_capture = nil
 
 local function id_store()
     local r = ids.rec
@@ -1309,6 +1397,16 @@ local function id_store()
 
     local serial = ids.pending
     ids.pending = ""
+
+    --[[
+        An appraise at a shopkeeper prints the same box an id does, so the
+        capture rides this machinery under a sentinel serial. It must not
+        reach the stats store — the item isn't ours.
+    ]]
+    if serial == "@shop" then
+        if type(cshop_capture) == "function" then cshop_capture(r) end
+        return
+    end
 
     -- wear it back / re-bag it before anything else goes out
     if ids.restore ~= "" then
@@ -3182,6 +3280,241 @@ local function on_wake(c, line, w)
 end
 
 ---
+-- consumable shopping, dinv's consume buy/small/big
+---
+
+local function room_now()
+    local n = tonumber(gfield(getGMCPData("room.info"), "num"))
+    if n == nil or n < 1 then return 0 end
+    return n
+end
+
+--[[
+    The appraise box landed (or didn't). Called by id_store under the
+    "@shop" sentinel; r is the parsed record or nil.
+]]
+cshop_capture = function(r)
+    local cat, kw = cshop.cat, cshop.kw
+    cshop.cat = ""
+    cshop.kw = ""
+    if cat == "" or kw == "" then return end
+
+    if type(r) ~= "table" or tonumber(r.level) == nil then
+        utilprint(TAGR .. "no appraise answer for '" .. kw .. "' - stand at "
+            .. "the shopkeeper and use a keyword the shop sells.")
+        return
+    end
+
+    local room = room_now()
+    local full = (type(r.item) == "string") and r.item or ""
+    cshop_add(cat, tonumber(r.level), kw, room, full)
+    save_cshop()
+
+    utilprint(TAG .. cat .. " now restocks with L" .. tostring(r.level)
+        .. " '" .. kw .. "'" .. ((full ~= "") and (" (" .. full .. ")") or "")
+        .. ((room > 0) and (" from room " .. room) or " (room unknown - GMCP was quiet)")
+        .. ".")
+    utilprint("$K  '/awinv consume buy " .. cat .. "' travels there and buys it.$w")
+end
+
+local function cshop_buy_stop()
+    if cshop.poll ~= nil then pcall(removeTimer, cshop.poll); cshop.poll = nil end
+    cshop.buyCat = ""
+    cshop.buyKw = ""
+    cshop.buyN = 0
+    cshop.buyRoom = 0
+    cshop.waited = 0
+end
+
+local function cshop_buy_arrive()
+    local n, kw = cshop.buyN, cshop.buyKw
+    -- Aardwolf's multi-buy: 'buy 5 griff'. dinv sends the keyword bare.
+    if n > 1 then
+        send("buy " .. n .. " " .. kw)
+    else
+        send("buy " .. kw)
+    end
+    utilprint(TAG .. "buying " .. n .. " x '" .. kw .. "'.")
+    cshop_buy_stop()
+    later(1800, function() refresh(false) end)
+end
+
+-- forward-declared so the timer callback can re-arm itself
+local cshop_poll_step = nil
+
+cshop_poll_step = function()
+    cshop.poll = nil
+    if cshop.buyRoom < 1 then return end
+    if room_now() == cshop.buyRoom then
+        cshop_buy_arrive()
+        return
+    end
+    cshop.waited = cshop.waited + 700
+    if cshop.waited >= 25000 then
+        utilprint(TAGR .. "never arrived at room " .. cshop.buyRoom
+            .. " - walk there yourself and rerun the buy, or re-record "
+            .. "the shop with '/awinv consume shop'.")
+        cshop_buy_stop()
+        return
+    end
+    cshop.poll = later(700, cshop_poll_step)
+end
+
+local function cshop_buy(cat, n)
+    if cshop.buyCat ~= "" then
+        utilprint(TAGR .. "a purchase is already in flight.")
+        return
+    end
+    local list = cshop.tab[cat]
+    if type(list) ~= "table" or list[1] == nil then
+        utilprint(TAGR .. "no shop entries for '" .. cat .. "'. Stand at the "
+            .. "shopkeeper and run '/awinv consume shop " .. cat .. " <keyword>'.")
+        return
+    end
+
+    -- dinv's rule: the highest-level entry you can actually use
+    local lv = char_level()
+    local best = nil
+    for _, e in ipairs(list) do
+        if e.lv <= lv then best = e end
+    end
+    if best == nil then
+        utilprint(TAGR .. "nothing in '" .. cat .. "' is usable at level " .. lv .. ".")
+        return
+    end
+    if tonumber(best.room) == nil or best.room < 1 then
+        utilprint(TAGR .. "the L" .. best.lv .. " '" .. best.kw .. "' entry has "
+            .. "no shop room recorded - re-record it at the shopkeeper.")
+        return
+    end
+
+    cshop.buyCat = cat
+    cshop.buyKw = best.kw
+    cshop.buyN = n
+    cshop.buyRoom = best.room
+    cshop.waited = 0
+
+    if room_now() == best.room then
+        cshop_buy_arrive()
+        return
+    end
+
+    --[[
+        walkTo is the client's own walker — it knows custom-exit command
+        stacking and wait() pauses, which a hand-compressed run does not.
+        It needs the map widget mounted; arrival is confirmed by polling
+        GMCP rather than trusting the walker's answer either way.
+    ]]
+    if type(walkTo) == "function" then
+        pcall(walkTo, best.room)
+        utilprint(TAG .. "walking to room " .. best.room .. " for L" .. best.lv
+            .. " '" .. best.kw .. "'...")
+    else
+        utilprint(TAGR .. "this build has no walkTo - walk to room " .. best.room
+            .. " and the buy fires when you arrive.")
+    end
+    cshop.poll = later(700, cshop_poll_step)
+end
+
+--[[
+    Drink N of a category. dinv's sizes: 'small' burns the lowest-level
+    usable instance you own (the dregs), 'big' the highest (the one worth
+    drinking in a fight). Candidates come from the shop entries' full
+    names when the category has them, plus the legacy keyword query.
+]]
+local function cshop_drink(cat, size, n)
+    local lv = char_level()
+    local seen = {}
+    local cand = {}
+
+    local function consider(serial)
+        if seen[serial] == true then return end
+        seen[serial] = true
+        local it = db.items[serial]
+        if type(it) ~= "table" then return end
+        if it.where ~= "inv" and pfind(it.where, "c:") ~= 1 then return end
+        local ilv = tonumber(it.level)
+        if ilv == nil then ilv = 0 end
+        if ilv > lv then return end
+        table.insert(cand, { serial = serial, lv = ilv })
+    end
+
+    local kw = cons[cat]
+    if type(kw) == "string" and kw ~= "" then
+        for _, serial in ipairs(q_find(kw)) do consider(serial) end
+    end
+    local list = cshop.tab[cat]
+    if type(list) == "table" then
+        for _, e in ipairs(list) do
+            if type(e.full) == "string" and e.full ~= "" then
+                local want = string.lower(e.full)
+                for serial, it in pairs(db.items) do
+                    if type(it) == "table"
+                        and string.lower(tostring(it.name or "")) == want then
+                        consider(serial)
+                    end
+                end
+            end
+            if e.kw ~= "" then
+                for _, serial in ipairs(q_find(e.kw)) do consider(serial) end
+            end
+        end
+    end
+
+    if type(kw) ~= "string" and type(list) ~= "table" then
+        utilprint(TAGR .. "no category '" .. cat
+            .. "'. '/awinv consume list' shows them.")
+        return
+    end
+    if #cand == 0 then
+        utilprint(TAGR .. "you own nothing in '" .. cat .. "' usable at level "
+            .. lv .. ". '/awinv consume buy " .. cat .. "' restocks.")
+        return
+    end
+
+    if size == "small" then
+        table.sort(cand, function(x, y)
+            if x.lv ~= y.lv then return x.lv < y.lv end
+            return x.serial < y.serial
+        end)
+    else
+        table.sort(cand, function(x, y)
+            if x.lv ~= y.lv then return x.lv > y.lv end
+            return x.serial < y.serial
+        end)
+    end
+
+    -- dinv caps a burst at 10 so a typo can't drain a stack
+    if n > 10 then
+        utilprint(TAG .. "capping at 10 per burst (dinv's own limit).")
+        n = 10
+    end
+    if n > #cand then n = #cand end
+
+    local i = 1
+    local function sip()
+        if i > n then return end
+        local e = cand[i]
+        i = i + 1
+        local it = db.items[e.serial]
+        if type(it) == "table" then
+            local verb = "quaff"
+            if it.itype == 19 or it.itype == 14 then verb = "eat" end
+            if it.itype == 2 then verb = "recite" end
+            if pfind(it.where, "c:") == 1 then
+                send("get " .. e.serial .. " " .. string.sub(it.where, 3))
+            end
+            send(verb .. " " .. e.serial)
+            utilprint(TAG .. verb .. " L" .. e.lv .. " " .. it.name
+                .. " (" .. (i - 1) .. "/" .. n .. ")")
+        end
+        if i <= n then later(600, sip) end
+    end
+    sip()
+    later(2500, function() refresh(false) end)
+end
+
+---
 -- setup
 ---
 
@@ -3222,6 +3555,7 @@ function init()
     load_snaps()
     load_rules()
     load_cons()
+    load_cshop()
 
     --[[
         Say what came back. Persistence failing silently is how a session's
@@ -3977,6 +4311,104 @@ function init()
                 save_cons()
                 utilprint(TAG .. "category removed.")
 
+            elseif string.sub(restLow, 1, 5) == "shop " then
+                --[[
+                    Record a shop entry: stand at the shopkeeper, name the
+                    category and the keyword the shop sells. The appraise
+                    box supplies level and full name, GMCP the room.
+                ]]
+                local body = trim(string.sub(rest, 6))
+                local sp = pfind(body, " ")
+                local nm = (sp ~= nil) and string.lower(string.sub(body, 1, sp - 1)) or ""
+                local kw = (sp ~= nil) and string.lower(trim(string.sub(body, sp + 1))) or ""
+                if nm == "" or kw == "" then
+                    utilprint(TAGR .. "usage: /awinv consume shop <category> <keyword> "
+                        .. "- run it standing at the shopkeeper.")
+                elseif ids.pending ~= "" or #ids.q > 0 then
+                    utilprint(TAGR .. "the identify queue is busy - try again "
+                        .. "in a moment.")
+                else
+                    cshop.cat = nm
+                    cshop.kw = kw
+                    ids.pending = "@shop"
+                    id_trigs(true)
+                    send("appraise " .. kw)
+                    id_guard_off()
+                    ids.guard = later(8000, function()
+                        ids.guard = nil
+                        if ids.pending == "@shop" and type(ids.rec) ~= "table" then
+                            ids.pending = ""
+                            id_trigs(false)
+                            cshop.cat = ""
+                            cshop.kw = ""
+                            utilprint(TAGR .. "no appraise box for '" .. kw
+                                .. "' - are you at a shopkeeper that sells it?")
+                        end
+                    end)
+                end
+
+            elseif restLow == "shops" then
+                local names = {}
+                for nm, _ in pairs(cshop.tab) do table.insert(names, nm) end
+                table.sort(names)
+                if #names == 0 then
+                    utilprint(TAG .. "no shop entries. Stand at a shopkeeper and "
+                        .. "run '/awinv consume shop <category> <keyword>'.")
+                end
+                for _, nm in ipairs(names) do
+                    utilprint("$w  $C" .. nm .. "$w:")
+                    for _, e in ipairs(cshop.tab[nm]) do
+                        utilprint("$w    L" .. e.lv .. "  " .. e.kw .. "  $Kroom "
+                            .. tostring(e.room)
+                            .. ((e.full ~= "") and ("  " .. e.full) or "") .. "$w")
+                    end
+                end
+
+            elseif string.sub(restLow, 1, 7) == "unshop " then
+                local body = trim(string.sub(restLow, 8))
+                local sp = pfind(body, " ")
+                local nm = (sp ~= nil) and string.sub(body, 1, sp - 1) or body
+                local kw = (sp ~= nil) and trim(string.sub(body, sp + 1)) or ""
+                if type(cshop.tab[nm]) ~= "table" then
+                    utilprint(TAGR .. "no shop category '" .. nm .. "'.")
+                elseif kw == "" then
+                    cshop.tab[nm] = nil
+                    save_cshop()
+                    utilprint(TAG .. "shop category '" .. nm .. "' removed.")
+                else
+                    local list = cshop.tab[nm]
+                    local kept = {}
+                    for _, e in ipairs(list) do
+                        if e.kw ~= kw then table.insert(kept, e) end
+                    end
+                    if #kept == 0 then
+                        cshop.tab[nm] = nil
+                    else
+                        cshop.tab[nm] = kept
+                    end
+                    save_cshop()
+                    utilprint(TAG .. "'" .. kw .. "' removed from '" .. nm .. "'.")
+                end
+
+            elseif string.sub(restLow, 1, 4) == "buy " then
+                local body = trim(string.sub(restLow, 5))
+                local sp = pfind(body, " ")
+                local nm = (sp ~= nil) and string.sub(body, 1, sp - 1) or body
+                local n = (sp ~= nil) and tonumber(trim(string.sub(body, sp + 1))) or 1
+                if n == nil or n < 1 then n = 1 end
+                if n > 99 then n = 99 end
+                cshop_buy(nm, math.floor(n))
+
+            elseif string.sub(restLow, 1, 6) == "small "
+                or string.sub(restLow, 1, 4) == "big " then
+                local size = (string.sub(restLow, 1, 3) == "big") and "big" or "small"
+                local body = trim(string.sub(restLow, (size == "big") and 5 or 7))
+                local sp = pfind(body, " ")
+                local nm = (sp ~= nil) and string.sub(body, 1, sp - 1) or body
+                local n = (sp ~= nil) and tonumber(trim(string.sub(body, sp + 1))) or 1
+                if n == nil or n < 1 then n = 1 end
+                cshop_drink(nm, size, math.floor(n))
+
             elseif restLow == "" or restLow == "list" then
                 local any = false
                 for nm, kw in pairs(cons) do
@@ -3985,39 +4417,24 @@ function init()
                         .. #held .. " held")
                     any = true
                 end
+                for nm, list in pairs(cshop.tab) do
+                    if type(list) == "table" and list[1] ~= nil then
+                        utilprint("$w  " .. nm .. "  $K" .. #list
+                            .. " shop entr" .. ((#list == 1) and "y" or "ies")
+                            .. ", top L" .. list[#list].lv .. "$w")
+                        any = true
+                    end
+                end
                 if not any then
-                    utilprint(TAG .. "no categories. '/awinv consume add fly griff' "
-                        .. "names a potion you buy, then '/awinv consume fly' drinks "
-                        .. "the best one you can use.")
+                    utilprint(TAG .. "no categories. Stand at a shopkeeper and "
+                        .. "'/awinv consume shop heal <keyword>' records where to "
+                        .. "buy; '/awinv consume buy heal' restocks; "
+                        .. "'/awinv consume heal' drinks the best one.")
                 end
 
             else
-                --[[
-                    Use the highest-level one you can actually use, dinv's
-                    'big'; that is the one worth drinking in a fight.
-                ]]
-                local kw = cons[restLow]
-                if type(kw) ~= "string" then
-                    utilprint(TAGR .. "no category '" .. restLow
-                        .. "'. '/awinv consume list' shows them.")
-                else
-                    local lv, pick, pickLv = char_level(), "", -1
-                    for _, serial in ipairs(q_find(kw)) do
-                        local it = db.items[serial]
-                        if it.where == "inv" or pfind(it.where, "c:") == 1 then
-                            local ilv = it.level
-                            if ilv <= lv and ilv > pickLv then
-                                pick, pickLv = serial, ilv
-                            end
-                        end
-                    end
-                    if pick == "" then
-                        utilprint(TAGR .. "none of your '" .. restLow
-                            .. "' items are usable at level " .. lv .. ".")
-                    else
-                        if type(do_cmd) == "function" then do_cmd("use " .. pick) end
-                    end
-                end
+                -- bare '/awinv consume <cat>' stays dinv's 'big', one item
+                cshop_drink(restLow, "big", 1)
             end
 
         elseif low == "bags" then
@@ -4453,6 +4870,10 @@ function init()
             utilprint("$w  /awinv weapon [type]       weapons ranked by damage type")
             utilprint("$w  /awinv consume add <name> <keyword>   name a potion you buy")
             utilprint("$w  /awinv consume <name>      drink the best one you can use")
+            utilprint("$w  /awinv consume shop <name> <kw>   at a shopkeeper: record where to buy")
+            utilprint("$w  /awinv consume buy <name> [n]     walk to the shop and restock")
+            utilprint("$w  /awinv consume small|big <name> [n]  drink lowest / highest usable")
+            utilprint("$w  /awinv consume shops       every recorded shop entry")
             utilprint("$w  /awinv prio clone <from> <to>      start from a class default")
             utilprint("$w  /awinv use [serial]        consumables/portals view, or use one")
             utilprint("$w  /awinv go <serial>         hold a portal and enter it")
